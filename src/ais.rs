@@ -85,6 +85,12 @@ impl Assembler {
         }
         // A message's sentences share a sequence id, a channel and a count.
         let same = |p: &Pending| p.id == id && p.channel == channel && p.count == count;
+        // Fill pads only the last sentence's last character, so it runs 0 to
+        // 5 there and is 0 everywhere else.
+        if fill > 5 || (number < count && fill != 0) {
+            self.pending.retain(|p| !same(p));
+            return Vec::new();
+        }
         if number == 1 {
             self.pending.retain(|p| !same(p));
             if self.pending.len() == PENDING {
@@ -120,8 +126,8 @@ impl Assembler {
 }
 
 /// A whole message's payload, less its fill bits, as the reports it holds.
-/// A message shorter than its type's full length is dropped rather than
-/// read with missing fields.
+/// A message too short to hold every field read for its type is dropped
+/// rather than read with missing fields.
 pub fn decode(payload: &str, fill: usize) -> Vec<Report> {
     let Some(bits) = Bits::new(payload, fill) else {
         return Vec::new();
@@ -159,7 +165,8 @@ pub fn decode(payload: &str, fill: usize) -> Vec<Report> {
                 .chain([Report::Particulars(particulars)])
                 .collect()
         }
-        // 424 bits in full; some receivers drop the two spare bits at the end.
+        // 424 bits in full; some receivers leave off the last two, the DTE
+        // flag and a spare bit, which omakeel doesn't read.
         Some(5) if long(422) => {
             let (length_m, beam_m) = dimensions(&bits, 240);
             vec![Report::Particulars(Particulars {
@@ -404,6 +411,20 @@ mod tests {
         let [a1, _] = static_on("A", "1");
         let [_, b2] = static_on("B", "1");
         assert!(heard(&[&a1, &b2]).is_empty());
+    }
+
+    #[test]
+    fn a_sentence_with_bad_fill_loses_its_message() {
+        let fill = |f: &str| resum(&STATIC_1.replace(",0*1C", &format!(",{f}*00")));
+        assert!(
+            heard(&[&fill("6"), STATIC_2]).is_empty(),
+            "fill runs 0 to 5"
+        );
+        assert!(
+            heard(&[&fill("2"), STATIC_2]).is_empty(),
+            "only the last sentence carries fill"
+        );
+        assert_eq!(heard(&[&fill("0"), STATIC_2]).len(), 1);
     }
 
     #[test]

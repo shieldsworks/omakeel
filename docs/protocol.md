@@ -108,7 +108,13 @@ whenever anything in it has changed.
   18 and 19 from class B) and particulars (types 5, 19 and 24). A message
   split across sentences is joined per source and channel, so messages on
   channels A and B can interleave. If one of its sentences is lost, so is the
-  message. A message shorter than its type's full length is dropped. Own-ship `!AIVDO` is ignored.
+  message. A message too short to hold every field omakeel reads for its
+  type is dropped: 168 bits for types 1, 2, 3 and 18, 312 for 19, 422 for 5
+  (whose last two bits omakeel doesn't read), and 160 and 162 for a type 24
+  part A and part B. Fill bits run 0 to 5 on a message's last sentence and
+  are 0 on the others. Own-ship `!AIVDO` is ignored.
+- When the table is full, a vessel with a position is only displaced by
+  another position report, never by particulars alone.
 - Particulars build up across messages. A class B sends its name in one
   type 24 message and its type, callsign and size in another.
 - `mmsi` is the vessel's identity. `kind` is `shipType` in words, and

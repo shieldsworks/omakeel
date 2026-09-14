@@ -49,16 +49,20 @@ impl Traffic {
         };
         if !self.vessels.contains_key(&mmsi) {
             self.expire(at);
-            // Full: a newcomer might be the one on a collision course, so it
-            // replaces the vessel least worth keeping, first one with no
-            // position, then the one heard longest ago.
+            // Full: a newcomer with a position might be the one on a collision
+            // course, so it replaces the vessel least worth keeping, first one
+            // with no position, then the one heard longest ago. A newcomer
+            // with only particulars never displaces a vessel with a position.
             if self.vessels.len() >= MAX_VESSELS
-                && let Some(&victim) = self
+                && let Some((&victim, positioned)) = self
                     .vessels
                     .iter()
                     .min_by_key(|(_, v)| (v.position.is_some(), v.heard))
-                    .map(|(mmsi, _)| mmsi)
+                    .map(|(mmsi, v)| (mmsi, v.position.is_some()))
             {
+                if positioned && !matches!(report, Report::Position(_)) {
+                    return;
+                }
                 self.vessels.remove(&victim);
             }
         }
@@ -491,6 +495,30 @@ mod tests {
         assert_eq!(targets.len(), MAX_VESSELS);
         assert_eq!(targets[0].mmsi, 5000, "the newcomer, nearest and first");
         assert!(targets[0].danger);
+    }
+
+    #[test]
+    fn a_full_table_keeps_its_vessels_with_positions_against_a_name() {
+        let t = Instant::now();
+        let mut traffic = Traffic::default();
+        for mmsi in 1..=MAX_VESSELS as u32 {
+            traffic.update(report(mmsi, at(1.0, 0.0), 6.0, 180.0), t);
+        }
+        traffic.update(
+            Report::Particulars(Particulars {
+                mmsi: 5000,
+                name: Some("NEWCOMER".into()),
+                ..Particulars::default()
+            }),
+            t + Duration::from_secs(1),
+        );
+        let targets = traffic.targets(t, still());
+        assert_eq!(targets.len(), MAX_VESSELS);
+        assert!(targets.iter().all(|t| t.mmsi != 5000));
+        assert!(
+            targets.iter().all(|t| t.danger),
+            "no danger displaced by a name"
+        );
     }
 
     #[test]
