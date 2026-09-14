@@ -6,8 +6,9 @@ on the keel.
 Omakeel is a headless Rust daemon. It reads the boat's instruments and serves
 one live stream to every Omahoy app.
 
-**Status: early.** It reads GPS and serves the fix. There's no Omarchy plugin
-to install yet.
+**Status: early.** It reads GPS and AIS and serves both.
+[omalookout](https://github.com/shieldsworks/omalookout) shows its traffic in
+the Omarchy bar. Tested on a replayed sail, not yet on a real receiver.
 
 ## What it does now
 
@@ -30,7 +31,13 @@ to install yet.
 
 ## Use
 
-Build with [mise](https://mise.jdx.dev) and Rust 1.98:
+Install from GitHub with Rust 1.89 or newer:
+
+```sh
+cargo install --git https://github.com/shieldsworks/omakeel --locked
+```
+
+Or build a checkout with [mise](https://mise.jdx.dev) and Rust 1.98:
 
 ```sh
 mise install
@@ -69,8 +76,6 @@ A phone sharing its GPS over Wi-Fi works too: `--source tcp:192.168.1.20:10110`.
 
 ## Next
 
-- The [omalookout](https://github.com/shieldsworks/omalookout) plugin, showing
-  these targets in the bar and a panel.
 - The anchor watch for [omanchor](https://github.com/shieldsworks/omanchor).
 - A bar widget showing speed and course.
 - Serving the same protocol across the boat's network.
