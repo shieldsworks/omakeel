@@ -8,7 +8,8 @@ one live stream to every Omahoy app.
 
 **Status: early.** It reads GPS and AIS and serves both.
 [omalookout](https://github.com/shieldsworks/omalookout) shows its traffic in
-the Omarchy bar. Tested on a replayed sail, not yet on a real receiver.
+the Omarchy bar. GPS is tested on a real USB receiver; AIS only on a replayed
+sail so far.
 
 ## What it does now
 
@@ -67,12 +68,32 @@ On the boat, with a USB GPS and a dAISy AIS receiver, recording the sail:
 
 ```sh
 target/debug/omakeel run \
-  --source serial:/dev/ttyUSB0:4800 \
+  --source serial:/dev/ttyUSB0:115200 \
   --source serial:/dev/ttyACM0:38400 \
   --record ~/sails/$(date +%F).nmea
 ```
 
+Use your GPS's baud rate. Our BU-353-style puck sends at 115200; older
+pucks send at 4800. At the wrong rate no fix ever comes: if `omakeel watch`
+shows no good sentences, try the other.
+
 A phone sharing its GPS over Wi-Fi works too: `--source tcp:192.168.1.20:10110`.
+
+**In a VM with no USB**, such as Try Omarchy on a Mac, share the GPS from the
+host over TCP instead. On the Mac, with socat from Homebrew (macOS socat takes
+`ispeed` and `ospeed`, not `b115200`):
+
+```sh
+socat TCP-LISTEN:10110,bind=127.0.0.1,reuseaddr,fork \
+  FILE:/dev/cu.usbserial-140,ispeed=115200,ospeed=115200,raw,echo=0
+```
+
+Binding to 127.0.0.1 keeps the GPS off the home network. In the VM, QEMU's
+user-mode network reaches the Mac at 10.0.2.2:
+
+```sh
+omakeel run --source tcp:10.0.2.2:10110
+```
 
 ## Next
 
