@@ -101,19 +101,25 @@ whenever anything in it has changed.
 ```
 
 - One entry per vessel heard in the last 10 minutes, up to 1000. They're
-  sorted nearest first, and vessels that can't be ranged come last.
+  sorted nearest first, and vessels that can't be ranged come last. When the
+  table is full, a new vessel replaces the one least worth keeping: first a
+  vessel with no position, then the one heard longest ago.
 - omakeel decodes `!AIVDM` position reports (types 1, 2 and 3 from class A;
   18 and 19 from class B) and particulars (types 5, 19 and 24). A message
-  split across sentences is joined per source; if one of its sentences is
-  lost, so is the message. Own-ship `!AIVDO` is ignored.
+  split across sentences is joined per source and channel, so messages on
+  channels A and B can interleave. If one of its sentences is lost, so is the
+  message. A message shorter than its type's full length is dropped. Own-ship `!AIVDO` is ignored.
 - Particulars build up across messages. A class B sends its name in one
   type 24 message and its type, callsign and size in another.
 - `mmsi` is the vessel's identity. `kind` is `shipType` in words, and
   `class` is `A` or `B`. `status` is class A's navigational status in words.
 - `lat`, `lon`, `sogKn`, `cogDeg` and `headingDeg` are as last reported.
-  `ageSeconds` is how long ago that report arrived.
+  `ageSeconds` is how long ago that report arrived. A position more than
+  10 minutes old is dropped, even while the vessel's particulars keep
+  arriving.
 - `lengthM` and `beamM` are summed from the reported distances of the GPS
-  antenna to each side.
+  antenna to each side. An auxiliary craft (MMSI 98...) sends its mother
+  ship's MMSI there instead, so it has no size.
 - `rangeNm` and `bearingDeg` (true, from the boat) are sent only with an `ok`
   fix. They use the vessel's position carried forward along its reported
   course and speed to now, the way a chartplotter shows a target between

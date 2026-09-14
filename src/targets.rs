@@ -49,8 +49,17 @@ impl Traffic {
         };
         if !self.vessels.contains_key(&mmsi) {
             self.expire(at);
-            if self.vessels.len() >= MAX_VESSELS {
-                return;
+            // Full: a newcomer might be the one on a collision course, so it
+            // replaces the vessel least worth keeping, first one with no
+            // position, then the one heard longest ago.
+            if self.vessels.len() >= MAX_VESSELS
+                && let Some(&victim) = self
+                    .vessels
+                    .iter()
+                    .min_by_key(|(_, v)| (v.position.is_some(), v.heard))
+                    .map(|(mmsi, _)| mmsi)
+            {
+                self.vessels.remove(&victim);
             }
         }
         let vessel = self.vessels.entry(mmsi).or_insert_with(|| Vessel {
@@ -83,9 +92,16 @@ impl Traffic {
         }
     }
 
+    /// Drops vessels not heard for `LOST_AFTER`, and positions that old even
+    /// from vessels still sending their particulars.
     pub fn expire(&mut self, now: Instant) {
-        self.vessels
-            .retain(|_, v| now.saturating_duration_since(v.heard) < LOST_AFTER);
+        let lost = |t: Instant| now.saturating_duration_since(t) >= LOST_AFTER;
+        self.vessels.retain(|_, v| !lost(v.heard));
+        for vessel in self.vessels.values_mut() {
+            if vessel.position.as_ref().is_some_and(|(_, at)| lost(*at)) {
+                vessel.position = None;
+            }
+        }
     }
 
     /// Every vessel, nearest first; any the boat can't range come last.
@@ -136,7 +152,11 @@ impl Vessel {
             tcpa_minutes: None,
             danger: false,
         };
-        let Some((p, at)) = &self.position else {
+        let Some((p, at)) = self
+            .position
+            .as_ref()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < LOST_AFTER)
+        else {
             return target;
         };
         let age = now.saturating_duration_since(*at);
@@ -425,6 +445,52 @@ mod tests {
         traffic.update(report(2, at(0.0, -2.0), 0.0, 0.0), t);
         let order: Vec<u32> = traffic.targets(t, still()).iter().map(|t| t.mmsi).collect();
         assert_eq!(order, [2, 3, 1]);
+    }
+
+    #[test]
+    fn a_position_ten_minutes_old_is_dropped_though_its_name_still_comes() {
+        let t = Instant::now();
+        let mut traffic = Traffic::default();
+        traffic.update(report(1, at(1.0, 0.0), 10.0, 180.0), t);
+        let named = |mmsi| {
+            Report::Particulars(Particulars {
+                mmsi,
+                name: Some("QUIET ONE".into()),
+                ..Particulars::default()
+            })
+        };
+        traffic.update(named(1), t + Duration::from_secs(540));
+        let now = t + LOST_AFTER + Duration::from_secs(60);
+        traffic.update(named(1), now);
+        let target = &traffic.targets(now, still())[0];
+        assert_eq!(target.name.as_deref(), Some("QUIET ONE"));
+        assert_eq!(
+            (target.lat, target.range_nm, target.cpa_nm),
+            (None, None, None)
+        );
+        assert!(!target.danger, "not carried forward for eleven minutes");
+        traffic.expire(now);
+        assert_eq!(traffic.targets(now, still())[0].lat, None);
+    }
+
+    #[test]
+    fn a_full_table_makes_room_for_a_vessel_with_a_position() {
+        let t = Instant::now();
+        let mut traffic = Traffic::default();
+        for mmsi in 1..=MAX_VESSELS as u32 {
+            traffic.update(
+                Report::Particulars(Particulars {
+                    mmsi,
+                    ..Particulars::default()
+                }),
+                t,
+            );
+        }
+        traffic.update(report(5000, at(1.0, 0.0), 6.0, 180.0), t);
+        let targets = traffic.targets(t, still());
+        assert_eq!(targets.len(), MAX_VESSELS);
+        assert_eq!(targets[0].mmsi, 5000, "the newcomer, nearest and first");
+        assert!(targets[0].danger);
     }
 
     #[test]
