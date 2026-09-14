@@ -1,0 +1,20 @@
+[package]
+name = "omakeel"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "The Omahoy data hub: GPS, AIS and sensors, served to every app"
+license = "MIT"
+repository = "https://github.com/shieldsworks/omakeel"
+homepage = "https://omahoy.org"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# termios for serial ports: raw mode and the baud rate an NMEA device expects.
+libc = "0.2"
+tokio = { version = "1.53", features = ["rt", "net", "time", "sync", "io-util", "fs", "macros", "signal"] }
+
+[dev-dependencies]
+# A paused clock, so the replay and staleness tests run in no real time.
+tokio = { version = "1.53", features = ["test-util"] }
