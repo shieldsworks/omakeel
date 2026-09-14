@@ -19,6 +19,11 @@ to install yet.
   ([docs/protocol.md](docs/protocol.md)).
 - Says when the fix is stale. Speed and course are never passed off as
   current once the GPS has stopped sending them.
+- Decodes AIS from a receiver like the dAISy: position reports from class A
+  ships and class B small craft, plus names, callsigns, types, sizes and
+  destinations. It keeps every vessel heard in the last 10 minutes with
+  range, bearing, and closest point of approach, and flags any that will
+  pass within 0.5 nm in the next 12 minutes.
 - Records every line it receives, AIS included, with the time it arrived.
   Replays those recordings in real time, so the apps can be developed at the
   dock.
@@ -44,8 +49,12 @@ mise watch
 omakeel 0.1.0 · protocol v1
 nofix   | replay:tests/fixtures/berkeley-marina.nmea ok (6 ok, 0 bad)
 ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (7 ok, 0 bad)
-ok      37°51.899′N  122°19.203′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (11 ok, 0 bad)
+AIS    3 vessels  · nearest SEA LARK 0.83 nm 301°T, CPA 0.83 nm in 0.0 min  DANGER BAY RUNNER
+ok      37°51.897′N  122°19.215′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (36 ok, 0 bad)
 ```
+
+The sample's vessels are invented. BAY RUNNER is a ferry set to cross 0.2 nm
+from the boat, to show the collision alarm.
 
 On the boat, with a USB GPS and a dAISy AIS receiver, recording the sail:
 
@@ -60,7 +69,8 @@ A phone sharing its GPS over Wi-Fi works too: `--source tcp:192.168.1.20:10110`.
 
 ## Next
 
-- AIS decoding for [omalookout](https://github.com/shieldsworks/omalookout).
+- The [omalookout](https://github.com/shieldsworks/omalookout) plugin, showing
+  these targets in the bar and a panel.
 - The anchor watch for [omanchor](https://github.com/shieldsworks/omanchor).
 - A bar widget showing speed and course.
 - Serving the same protocol across the boat's network.

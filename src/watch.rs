@@ -30,6 +30,7 @@ pub fn run(socket: &Path) -> io::Result<()> {
                 message["v"]
             ),
             Some("state") => println!("{}", describe(&message)),
+            Some("targets") => println!("{}", describe_targets(&message)),
             _ => {}
         }
     }
@@ -64,6 +65,41 @@ pub fn describe(state: &Value) -> String {
     out
 }
 
+/// One `targets` message as a line: how many vessels, the nearest, and any
+/// danger by name.
+pub fn describe_targets(message: &Value) -> String {
+    let targets = message["targets"].as_array().map_or(&[][..], Vec::as_slice);
+    let called = |t: &Value| {
+        t["name"]
+            .as_str()
+            .map_or_else(|| format!("MMSI {}", t["mmsi"]), str::to_string)
+    };
+    let mut out = match targets.len() {
+        1 => "AIS    1 vessel".to_string(),
+        n => format!("AIS    {n} vessels"),
+    };
+    if let Some(near) = targets.iter().find(|t| t["rangeNm"].is_number()) {
+        out += &format!(
+            "  · nearest {} {:.2} nm {:03.0}°T",
+            called(near),
+            near["rangeNm"].as_f64().unwrap_or_default(),
+            near["bearingDeg"].as_f64().unwrap_or_default()
+        );
+        if let (Some(cpa), Some(tcpa)) = (near["cpaNm"].as_f64(), near["tcpaMinutes"].as_f64()) {
+            out += &format!(", CPA {cpa:.2} nm in {tcpa:.1} min");
+        }
+    }
+    let dangers: Vec<String> = targets
+        .iter()
+        .filter(|t| t["danger"] == true)
+        .map(called)
+        .collect();
+    if !dangers.is_empty() {
+        out += &format!("  DANGER {}", dangers.join(", "));
+    }
+    out
+}
+
 /// Degrees and decimal minutes, the way a chart and a GPS show them.
 fn dm(value: f64, positive: char, negative: char, width: usize) -> String {
     let hemisphere = if value < 0.0 { negative } else { positive };
@@ -92,6 +128,21 @@ mod tests {
             describe(&state),
             "ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | serial:/dev/ttyUSB0:4800 ok (12 ok, 1 bad)"
         );
+    }
+
+    #[test]
+    fn describes_the_traffic_and_names_a_danger() {
+        let message = serde_json::json!({"type": "targets", "v": 1, "targets": [
+            {"mmsi": 366999101, "name": "BAY RUNNER", "rangeNm": 1.52, "bearingDeg": 311.2, "cpaNm": 0.19, "tcpaMinutes": 4.2, "danger": true},
+            {"mmsi": 366999102, "rangeNm": 3.1, "bearingDeg": 190.0, "danger": false},
+            {"mmsi": 338999103, "danger": false}
+        ]});
+        assert_eq!(
+            describe_targets(&message),
+            "AIS    3 vessels  · nearest BAY RUNNER 1.52 nm 311°T, CPA 0.19 nm in 4.2 min  DANGER BAY RUNNER"
+        );
+        let quiet = serde_json::json!({"type": "targets", "v": 1, "targets": []});
+        assert_eq!(describe_targets(&quiet), "AIS    0 vessels");
     }
 
     #[test]

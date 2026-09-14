@@ -1,9 +1,12 @@
-//! The hub: sentences in from every source, one state out to every app.
+//! The hub: sentences in from every source, the fix and the traffic out to
+//! every app.
 
+use crate::ais::Assembler;
 use crate::fix::{Navigation, STALE_AFTER};
 use crate::nmea;
-use crate::protocol::{Message, SourceState, SourceStatus, VERSION};
+use crate::protocol::{FixStatus, Message, SourceState, SourceStatus, VERSION};
 use crate::source::{self, Event, Spec};
+use crate::targets::{Own, Traffic};
 use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
@@ -70,6 +73,7 @@ pub async fn run(config: Config) -> io::Result<()> {
         .map(|spec| Tracked {
             state: SourceState::new(spec.to_string()),
             heard: None,
+            ais: Assembler::default(),
         })
         .collect();
     for (index, spec) in config.sources.into_iter().enumerate() {
@@ -78,13 +82,19 @@ pub async fn run(config: Config) -> io::Result<()> {
     drop(tx);
 
     let mut nav = Navigation::default();
+    let mut traffic = Traffic::default();
     let mut clients: Vec<Client> = Vec::new();
-    let mut last: Arc<str> = Arc::from("");
+    let mut last_state: Arc<str> = Arc::from("");
+    let mut last_targets = encode(&Message::Targets {
+        v: VERSION,
+        targets: &[],
+    });
     // Once a second the hub re-judges freshness, so a fix goes stale on
-    // time even when nothing arrives.
+    // time even when nothing arrives, and sends the traffic.
     let mut tick = interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
+        let mut ticked = false;
         tokio::select! {
             Some(event) = events.recv() => match event {
                 Event::Line { source, line } => {
@@ -103,6 +113,9 @@ pub async fn run(config: Config) -> io::Result<()> {
                             tracked.state.sentences += 1;
                             if let Some(position) = nmea::position(&sentence) {
                                 nav.update(position, now);
+                            }
+                            for report in tracked.ais.feed(&sentence) {
+                                traffic.update(report, now);
                             }
                         }
                         Err(_) => tracked.state.rejected += 1,
@@ -127,7 +140,7 @@ pub async fn run(config: Config) -> io::Result<()> {
                     sleep(Duration::from_millis(100)).await;
                 }
             },
-            _ = tick.tick() => {}
+            _ = tick.tick() => ticked = true,
         }
 
         let now = Instant::now();
@@ -139,31 +152,56 @@ pub async fn run(config: Config) -> io::Result<()> {
                 tracked.state.status = SourceStatus::Quiet;
             }
         }
+        let fix = nav.state(now);
         let states: Vec<SourceState> = sources.iter().map(|t| t.state.clone()).collect();
         let state = encode(&Message::State {
             v: VERSION,
-            fix: &nav.state(now),
+            fix: &fix,
             sources: &states,
         });
-        let changed = state != last;
+        let state_changed = state != last_state;
+        last_state = state;
+
+        let mut targets_changed = false;
+        if ticked {
+            traffic.expire(now);
+            // Ranges and CPAs only from a current fix.
+            let own = match (fix.status, fix.lat, fix.lon) {
+                (FixStatus::Ok, Some(lat), Some(lon)) => Some(Own {
+                    lat,
+                    lon,
+                    sog_kn: fix.sog_kn,
+                    cog_deg: fix.cog_deg,
+                }),
+                _ => None,
+            };
+            let targets = encode(&Message::Targets {
+                v: VERSION,
+                targets: &traffic.targets(now, own),
+            });
+            targets_changed = targets != last_targets;
+            last_targets = targets;
+        }
+
         clients.retain_mut(|client| {
             // An app that has left is let go even when there's nothing new.
             if client.tx.is_closed() {
                 return false;
             }
-            if !changed && !client.fresh {
-                return true;
-            }
-            client.fresh = false;
-            client.tx.try_send(state.clone()).is_ok()
+            let fresh = std::mem::take(&mut client.fresh);
+            let sent_state =
+                !(state_changed || fresh) || client.tx.try_send(last_state.clone()).is_ok();
+            sent_state
+                && (!(targets_changed || fresh) || client.tx.try_send(last_targets.clone()).is_ok())
         });
-        last = state;
     }
 }
 
 struct Tracked {
     state: SourceState,
     heard: Option<Instant>,
+    /// Multi-sentence AIS messages are joined per source.
+    ais: Assembler,
 }
 
 fn encode(message: &Message) -> Arc<str> {
@@ -176,7 +214,7 @@ fn encode(message: &Message) -> Arc<str> {
 /// it closes the app's socket at once, queued messages and all.
 struct Client {
     tx: mpsc::Sender<Arc<str>>,
-    /// Hasn't been sent the current state yet.
+    /// Hasn't been sent the current state and targets yet.
     fresh: bool,
     task: JoinHandle<()>,
 }

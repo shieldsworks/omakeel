@@ -85,6 +85,52 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
     assert_eq!(fix["sogKn"], 5.0);
     assert_eq!(fix["satellites"], 9);
 
+    // The sample's ferry is set to pass 0.2 nm from the boat in about five
+    // minutes: a danger once both have positions, speeds and courses. The
+    // danger can come before the names do (the cargo ship's arrives at 9 s),
+    // so wait for all three vessels named and the danger flagged.
+    let traffic = loop {
+        let message = next(&mut lines).await;
+        let Some(targets) = message["targets"].as_array() else {
+            continue;
+        };
+        let named = targets.len() == 3 && targets.iter().all(|t| t["name"].is_string());
+        if named && targets.iter().any(|t| t["danger"] == true) {
+            break message;
+        }
+    };
+    let vessel = |mmsi: u32| {
+        traffic["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["mmsi"] == mmsi)
+            .unwrap_or_else(|| panic!("{mmsi} missing"))
+            .clone()
+    };
+    let ferry = vessel(366999101);
+    assert_eq!(
+        ferry["name"], "BAY RUNNER",
+        "joined from a two-sentence type 5"
+    );
+    assert_eq!(
+        (ferry["kind"].as_str(), ferry["class"].as_str()),
+        (Some("passenger"), Some("A"))
+    );
+    assert_eq!(ferry["lengthM"], 40);
+    assert!(ferry["cpaNm"].as_f64().unwrap() < 0.5);
+    assert!(ferry["tcpaMinutes"].as_f64().unwrap() <= 12.0);
+    let cargo = vessel(366999102);
+    assert_eq!(cargo["name"], "PACIFIC TRADER");
+    assert_eq!(cargo["danger"], false, "heading away");
+    let sailboat = vessel(338999103);
+    assert_eq!(sailboat["name"], "SEA LARK", "from a type 24 part A");
+    assert_eq!(
+        (sailboat["class"].as_str(), sailboat["kind"].as_str()),
+        (Some("B"), Some("sailing"))
+    );
+    assert_eq!(sailboat["lengthM"], 11);
+
     let recorded = sentences(Path::new(SAIL));
     let ended = loop {
         let state = next(&mut lines).await;

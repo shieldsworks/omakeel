@@ -17,6 +17,10 @@ pub enum Message<'a> {
         fix: &'a FixState,
         sources: &'a [SourceState],
     },
+    Targets {
+        v: u32,
+        targets: &'a [Target],
+    },
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +81,7 @@ pub enum SourceStatus {
     Ok,
     /// Connected, but nothing received for five seconds.
     Quiet,
-    /// Can't be opened or reached; retried every two seconds.
+    /// Can't be opened or reached.
     Error,
     /// A replay that has reached the end of its recording.
     Ended,
@@ -107,4 +111,50 @@ impl SourceState {
             rejected: 0,
         }
     }
+}
+
+/// One vessel heard on AIS. `docs/protocol.md`, targets.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Target {
+    pub mmsi: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callsign: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ship_type: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lon: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sog_kn: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cog_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heading_deg: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_m: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beam_m: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_nm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bearing_deg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpa_nm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcpa_minutes: Option<f64>,
+    pub danger: bool,
 }

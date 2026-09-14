@@ -16,6 +16,8 @@ Version 1. omakeel is the server. Every Omahoy app is a client.
   an error and stops using the data.
 - Key order is not significant. Keys that don't apply are left out, never
   sent as `null`.
+- Apps ignore message types and keys they don't know, so version 1 can grow
+  without breaking them.
 - An app that can't take a message within 2 seconds, or falls 64 messages
   behind, is disconnected. It can reconnect.
 
@@ -83,6 +85,47 @@ One entry per `--source`, in command-line order.
   - `ended`: a replay reached the end of its recording.
 - `sentences` counts lines that checked out as NMEA sentences. `rejected`
   counts the rest: bad checksums and garbage.
+
+### `targets`
+
+Every vessel heard on AIS, sent after `state` on connect, then once a second
+whenever anything in it has changed.
+
+```json
+{"type":"targets","v":1,"targets":[
+ {"mmsi":366999101,"name":"BAY RUNNER","callsign":"WDX9101","shipType":60,"kind":"passenger",
+  "class":"A","status":"under way using engine","lat":37.8809371,"lon":-122.3463369,
+  "sogKn":20.0,"cogDeg":150.0,"headingDeg":150,"lengthM":40,"beamM":10,
+  "destination":"SF FERRY BLDG","ageSeconds":1,"rangeNm":1.52,"bearingDeg":311.2,
+  "cpaNm":0.19,"tcpaMinutes":4.2,"danger":true}]}
+```
+
+- One entry per vessel heard in the last 10 minutes, up to 1000. They're
+  sorted nearest first, and vessels that can't be ranged come last.
+- omakeel decodes `!AIVDM` position reports (types 1, 2 and 3 from class A;
+  18 and 19 from class B) and particulars (types 5, 19 and 24). A message
+  split across sentences is joined per source; if one of its sentences is
+  lost, so is the message. Own-ship `!AIVDO` is ignored.
+- Particulars build up across messages. A class B sends its name in one
+  type 24 message and its type, callsign and size in another.
+- `mmsi` is the vessel's identity. `kind` is `shipType` in words, and
+  `class` is `A` or `B`. `status` is class A's navigational status in words.
+- `lat`, `lon`, `sogKn`, `cogDeg` and `headingDeg` are as last reported.
+  `ageSeconds` is how long ago that report arrived.
+- `lengthM` and `beamM` are summed from the reported distances of the GPS
+  antenna to each side.
+- `rangeNm` and `bearingDeg` (true, from the boat) are sent only with an `ok`
+  fix. They use the vessel's position carried forward along its reported
+  course and speed to now, the way a chartplotter shows a target between
+  reports.
+- `cpaNm` and `tcpaMinutes` are the closest point of approach and the
+  minutes until it. They need both vessels' speed and course. A vessel under
+  0.5 knots with no course counts as stopped. For a vessel already past its
+  closest, `cpaNm` is the range now and `tcpaMinutes` is 0.
+- `danger` is true for a CPA of 0.5 nm or less within 12 minutes. These
+  thresholds are fixed for now.
+- Distances are flat-earth from the boat, which is off by a small fraction
+  of a mile at the edge of AIS range.
 
 ## Recordings
 
