@@ -1,5 +1,6 @@
 //! `omakeel watch`: the hub's state as one line per change, for a terminal.
 
+use crate::protocol::VERSION;
 use serde_json::Value;
 use std::{
     io::{self, BufRead, BufReader},
@@ -16,6 +17,12 @@ pub fn run(socket: &Path) -> io::Result<()> {
     })?;
     for line in BufReader::new(stream).lines() {
         let message: Value = serde_json::from_str(&line?).map_err(io::Error::other)?;
+        if message["v"].as_u64() != Some(u64::from(VERSION)) {
+            return Err(io::Error::other(format!(
+                "the hub speaks protocol v{}; this watch speaks v{VERSION}",
+                message["v"]
+            )));
+        }
         match message["type"].as_str() {
             Some("hello") => println!(
                 "omakeel {} · protocol v{}",

@@ -6,6 +6,9 @@ Version 1. omakeel is the server. Every Omahoy app is a client.
 
 - A Unix stream socket, `$XDG_RUNTIME_DIR/omakeel/keel.sock` by default
   (`--socket` sets another). The directory is created with mode 0700.
+- A lock file beside the socket (`keel.lock`) keeps a second hub from
+  starting on the same socket. A socket left behind by a crashed hub is
+  replaced.
 - Newline-delimited JSON, UTF-8, one object per line.
 - Any number of apps may connect. Every app receives every message. Apps send
   nothing in version 1.
@@ -46,12 +49,18 @@ replace their copy rather than merging.
   - `ok`: a fix less than 5 seconds old.
   - `stale`: the last fix is 5 seconds old or more. The position stays in
     the message with its age. Apps show it as stale, never as current.
+- Only a real fix counts: RMC status `A` in a mode that isn't estimated,
+  manual, simulated or not valid (`E`, `M`, `S`, `N`), or GGA quality 1 to 5.
+  Dead reckoning (6), manual input (7) and simulation (8) are `nofix`.
+  Coordinates must have exactly two whole-minute digits, `ddmm.mmmm`, because
+  the checksum can't catch a moved decimal point.
 - `lat` and `lon` are decimal degrees, WGS 84, rounded to 7 places. South and
   west are negative.
 - `sogKn` and `cogDeg` are speed in knots and course in degrees true, over
   ground. `utc` is the receiver's time, whole seconds. All three come from
-  RMC, and each goes missing when RMC stops sending it.
-- `satellites` and `hdop` come from GGA.
+  RMC. Each goes missing when RMC leaves it empty, or when the newest RMC is
+  5 seconds older than the newest position.
+- `satellites` and `hdop` come from GGA, and go missing the same way.
 - `ageSeconds` is whole seconds since the fix arrived at the hub, measured by
   the hub's clock, not the receiver's.
 - With more than one position source, the most recent sentence from any of
@@ -76,8 +85,10 @@ One entry per `--source`, in command-line order.
 
 ## Recordings
 
-`--record FILE` writes every line received from every source, as it arrived,
-rejected lines included. omakeel never overwrites an existing file.
+`--record FILE` writes every line received from every source, rejected lines
+included, stamped with the time it arrived. Each line is trimmed of surrounding
+whitespace, invalid UTF-8 is replaced, and blank lines are skipped. omakeel
+never overwrites an existing file.
 
 ```
 # omakeel recording v1
@@ -86,10 +97,11 @@ rejected lines included. omakeel never overwrites an existing file.
 ```
 
 - Lines starting with `#` are comments.
-- Every other line is Unix milliseconds, one space, then the line exactly as
-  received.
-- Each line is flushed as it is written, so a recording survives the power
-  going out.
+- Every other line is Unix milliseconds, one space, then the line.
+- Lines are written on a thread of their own and synced to disk every 10
+  seconds, so a power cut loses at most the last few seconds. If the disk
+  falls far behind, lines are dropped and omakeel says so on stderr, rather
+  than stalling navigation.
 
 `replay:FILE` plays a recording back in real time. It plays once, then the
 source reports `ended` and the fix goes stale.

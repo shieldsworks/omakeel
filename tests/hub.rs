@@ -130,6 +130,34 @@ async fn a_second_hub_refuses_a_running_hubs_socket() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_socket_left_by_a_crashed_hub_is_replaced() {
+    let dir = scratch("leftover");
+    let socket = dir.join("keel.sock");
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    assert!(socket.exists(), "a crash leaves the socket file behind");
+    let hub = tokio::spawn(hub::run(replay(&socket, None)));
+    let mut lines = connect(&socket).await;
+    assert_eq!(next(&mut lines).await["type"], "hello");
+    hub.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_app_that_leaves_is_let_go() {
+    let dir = scratch("leaves");
+    let socket = dir.join("keel.sock");
+    let hub = tokio::spawn(hub::run(replay(&socket, None)));
+    for _ in 0..3 {
+        let mut lines = connect(&socket).await;
+        assert_eq!(next(&mut lines).await["type"], "hello");
+    }
+    // The hub still serves a new app after others have come and gone.
+    let mut lines = connect(&socket).await;
+    assert_eq!(next(&mut lines).await["type"], "hello");
+    assert_eq!(next(&mut lines).await["type"], "state");
+    hub.abort();
+}
+
+#[tokio::test(start_paused = true)]
 async fn recording_never_overwrites_a_sail() {
     let dir = scratch("overwrite");
     let record = dir.join("sail.nmea");

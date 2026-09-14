@@ -17,8 +17,12 @@ use tokio::{
     time::{Duration, Instant, sleep, sleep_until},
 };
 
-/// A line longer than this isn't NMEA; it is cut up and rejected.
+/// A line longer than this isn't NMEA, so it's read in pieces that fail
+/// their checksums. A whole sentence at the end of one still counts, the way
+/// NMEA readers resynchronize on `$`.
 const MAX_LINE: u64 = 1024;
+/// A recording's line: a timestamp, a space, then a line up to `MAX_LINE`.
+const MAX_RECORD: u64 = 2 * MAX_LINE;
 /// Wait between attempts to reopen a device or reconnect a stream.
 const RETRY: Duration = Duration::from_secs(2);
 /// NMEA 0183's standard rate, and the GlobalSat BU-353-S4's.
@@ -98,6 +102,8 @@ impl fmt::Display for Spec {
 }
 
 /// Starts reading `spec`, sending each line and status change as `source`.
+/// TCP and replay stop as soon as the hub is gone. A serial port's thread
+/// stops at its next line, or when the process exits.
 pub fn spawn(source: usize, spec: Spec, events: mpsc::Sender<Event>) {
     match spec {
         Spec::Serial { path, baud } => {
@@ -112,6 +118,7 @@ pub fn spawn(source: usize, spec: Spec, events: mpsc::Sender<Event>) {
     }
 }
 
+/// A received line, trimmed, with invalid UTF-8 replaced; blank lines are none.
 fn line(source: usize, bytes: &[u8]) -> Option<Event> {
     let line = String::from_utf8_lossy(bytes).trim().to_string();
     (!line.is_empty()).then_some(Event::Line { source, line })
@@ -171,11 +178,14 @@ fn speed(baud: u32) -> Option<libc::speed_t> {
 
 /// Opens a serial device raw at `baud`, as a GPS or AIS receiver expects.
 fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
+    let speed = speed(baud).ok_or_else(|| io::Error::other("unsupported baud rate"))?;
+    // Non-blocking, so a port that would wait for carrier detect can't hang
+    // the open. A GPS has no modem lines; CLOCAL below says so, and then
+    // reads go back to blocking.
     let device = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOCTTY)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
         .open(path)?;
-    let speed = speed(baud).ok_or_else(|| io::Error::other("unsupported baud rate"))?;
     let fd = device.as_raw_fd();
     // SAFETY: `fd` is open for the life of `device`, and `termios` is a
     // plain C struct that `tcgetattr` fills in before anything reads it.
@@ -193,6 +203,10 @@ fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
         if libc::tcsetattr(fd, libc::TCSANOW, &termios) != 0 {
             return Err(io::Error::last_os_error());
         }
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     Ok(device)
 }
@@ -200,17 +214,22 @@ fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
 /// Reads an NMEA stream over TCP, reconnecting when it drops.
 async fn tcp(source: usize, address: String, events: mpsc::Sender<Event>) {
     loop {
-        let error = match TcpStream::connect(&address).await {
+        let connected = tokio::select! {
+            connected = TcpStream::connect(&address) => connected,
+            () = events.closed() => return,
+        };
+        let error = match connected {
             Ok(stream) => {
                 let mut reader = AsyncBufReader::new(stream);
                 let mut buf = Vec::new();
                 loop {
                     buf.clear();
-                    match (&mut reader)
-                        .take(MAX_LINE)
-                        .read_until(b'\n', &mut buf)
-                        .await
-                    {
+                    let mut limited = (&mut reader).take(MAX_LINE);
+                    let read = tokio::select! {
+                        read = limited.read_until(b'\n', &mut buf) => read,
+                        () = events.closed() => return,
+                    };
+                    match read {
                         Ok(0) => break "connection closed".to_string(),
                         Ok(_) => {
                             if let Some(event) = line(source, &buf)
@@ -232,15 +251,18 @@ async fn tcp(source: usize, address: String, events: mpsc::Sender<Event>) {
         {
             return;
         }
-        sleep(RETRY).await;
+        tokio::select! {
+            () = sleep(RETRY) => {}
+            () = events.closed() => return,
+        }
     }
 }
 
-/// Plays a recording (`docs/protocol.md`, recordings) with its original
-/// timing, then reports the source ended.
+/// Plays a recording (`docs/protocol.md`, recordings) line by line with its
+/// original timing, then reports the source ended.
 async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
-    let text = match tokio::fs::read_to_string(&path).await {
-        Ok(text) => text,
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
         Err(e) => {
             let _ = events
                 .send(failed(source, format!("{}: {e}", path.display())))
@@ -248,9 +270,27 @@ async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
             return;
         }
     };
+    let mut reader = AsyncBufReader::new(file);
+    let mut buf = Vec::new();
     let start = Instant::now();
     let mut first = None;
-    for record in text.lines() {
+    loop {
+        buf.clear();
+        match (&mut reader)
+            .take(MAX_RECORD)
+            .read_until(b'\n', &mut buf)
+            .await
+        {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                let _ = events
+                    .send(failed(source, format!("{}: {e}", path.display())))
+                    .await;
+                return;
+            }
+        }
+        let record = String::from_utf8_lossy(&buf);
         let record = record.trim();
         if record.is_empty() || record.starts_with('#') {
             continue;
@@ -260,7 +300,10 @@ async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
         };
         let Ok(ms) = ms.parse::<u64>() else { continue };
         let offset = ms.saturating_sub(*first.get_or_insert(ms));
-        sleep_until(start + Duration::from_millis(offset)).await;
+        tokio::select! {
+            () = sleep_until(start + Duration::from_millis(offset)) => {}
+            () = events.closed() => return,
+        }
         if let Some(event) = line(source, sentence.as_bytes())
             && events.send(event).await.is_err()
         {
@@ -333,6 +376,22 @@ mod tests {
                 ..
             })
         ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replay_stops_when_the_hub_is_gone() {
+        let path = std::env::temp_dir().join(format!("omakeel-gap-{}.nmea", std::process::id()));
+        // An hour-long gap between two lines.
+        std::fs::write(&path, "0 $A\n3600000 $B\n").unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        let task = tokio::spawn(replay(0, path.clone(), tx));
+        assert!(matches!(rx.recv().await, Some(Event::Line { .. })));
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("replay should stop without waiting out the gap")
+            .unwrap();
         std::fs::remove_file(path).unwrap();
     }
 }
