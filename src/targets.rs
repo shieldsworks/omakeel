@@ -268,7 +268,7 @@ fn status(code: u8) -> Option<&'static str> {
         0 => "under way using engine",
         1 => "at anchor",
         2 => "not under command",
-        3 => "restricted manoeuvrability",
+        3 => "restricted maneuverability",
         4 => "constrained by draught",
         5 => "moored",
         6 => "aground",
