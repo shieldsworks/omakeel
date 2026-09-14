@@ -5,6 +5,7 @@ use crate::nmea;
 use crate::protocol::{Message, SourceState, SourceStatus, VERSION};
 use crate::source::{self, Event, Spec};
 use std::{
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Write},
     os::unix::{
@@ -14,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        mpsc::{SyncSender, TrySendError, sync_channel},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, channel, sync_channel},
     },
     thread,
     time::{SystemTime, UNIX_EPOCH},
@@ -34,8 +35,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Lines waiting for the recorder's thread. A disk this far behind loses
 /// lines, and says so, rather than stalling navigation.
 const RECORD_QUEUE: usize = 4096;
-/// How often the recording is synced to disk: the most a power cut loses.
+/// A recorded line reaches the disk within this long: the most a power cut
+/// loses.
 const SYNC_EVERY: Duration = Duration::from_secs(10);
+/// How long exiting waits for the recording to reach the disk. A stalled
+/// disk mustn't hang shutdown.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 pub struct Config {
     pub sources: Vec<Spec>,
@@ -143,6 +148,10 @@ pub async fn run(config: Config) -> io::Result<()> {
         });
         let changed = state != last;
         clients.retain_mut(|client| {
+            // An app that has left is let go even when there's nothing new.
+            if client.tx.is_closed() {
+                return false;
+            }
             if !changed && !client.fresh {
                 return true;
             }
@@ -244,7 +253,15 @@ fn bind(path: &Path) -> io::Result<(UnixListener, SocketFile)> {
     ))
 }
 
-/// An exclusive lock on `keel.lock` beside `keel.sock`, held until exit.
+/// `keel.sock.lock` for `keel.sock`: the whole socket name plus `.lock`, so
+/// no two socket names share a lock.
+fn lock_path(socket: &Path) -> PathBuf {
+    let mut name = OsString::from(socket.as_os_str());
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// An exclusive lock beside the socket, held until exit.
 fn lock(socket: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -252,7 +269,7 @@ fn lock(socket: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(socket.with_extension("lock"))?;
+        .open(lock_path(socket))?;
     // SAFETY: `flock` on a descriptor `file` owns; the lock lasts until the
     // file is closed.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -285,7 +302,8 @@ impl Drop for SocketFile {
 /// slow disk never holds up navigation.
 struct Recorder {
     lines: Option<SyncSender<String>>,
-    thread: Option<thread::JoinHandle<()>>,
+    /// Disconnects when the thread has finished, however it finished.
+    finished: Receiver<()>,
     path: PathBuf,
     behind: bool,
 }
@@ -307,25 +325,17 @@ impl Recorder {
         File::open(dir.unwrap_or(Path::new(".")))?.sync_all()?;
 
         let (tx, rx) = sync_channel::<String>(RECORD_QUEUE);
+        let (finished_tx, finished) = channel::<()>();
         let shown = path.display().to_string();
-        let thread = thread::spawn(move || {
-            let mut synced = std::time::Instant::now();
-            for line in rx {
-                if let Err(e) = writeln!(out, "{line}").and_then(|()| out.flush()) {
-                    eprintln!("omakeel: stopped recording to {shown}: {e}");
-                    return;
-                }
-                if synced.elapsed() >= SYNC_EVERY {
-                    let _ = out.get_ref().sync_data();
-                    synced = std::time::Instant::now();
-                }
+        thread::spawn(move || {
+            let _finished = finished_tx;
+            if let Err(e) = record(&mut out, &rx) {
+                eprintln!("omakeel: stopped recording to {shown}: {e}");
             }
-            let _ = out.flush();
-            let _ = out.get_ref().sync_data();
         });
         Ok(Recorder {
             lines: Some(tx),
-            thread: Some(thread),
+            finished,
             path: path.to_path_buf(),
             behind: false,
         })
@@ -359,12 +369,61 @@ impl Recorder {
     }
 }
 
+/// The recorder's thread: write each line, and sync it to disk within
+/// `SYNC_EVERY` of writing it, idle or not. Stops at the first failed write
+/// or sync, since a recording that can't reach the disk isn't one.
+fn record(out: &mut BufWriter<File>, lines: &Receiver<String>) -> io::Result<()> {
+    let mut unsynced_since: Option<std::time::Instant> = None;
+    loop {
+        let wait = unsynced_since.map_or(Duration::from_secs(3600), |t| {
+            SYNC_EVERY.saturating_sub(t.elapsed())
+        });
+        match lines.recv_timeout(wait) {
+            Ok(line) => {
+                writeln!(out, "{line}")?;
+                out.flush()?;
+                unsynced_since.get_or_insert_with(std::time::Instant::now);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if unsynced_since.is_some_and(|t| t.elapsed() >= SYNC_EVERY) {
+            out.get_ref().sync_data()?;
+            unsynced_since = None;
+        }
+    }
+    out.flush()?;
+    out.get_ref().sync_data()
+}
+
 impl Drop for Recorder {
     fn drop(&mut self) {
-        // Close the queue; the thread writes what's left, syncs, and ends.
+        // Close the queue so the thread writes what's left and syncs, then
+        // wait for it, but not forever.
         drop(self.lines.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Err(RecvTimeoutError::Timeout) = self.finished.recv_timeout(SHUTDOWN_WAIT) {
+            eprintln!(
+                "omakeel: gave up waiting for {} to reach the disk",
+                self.path.display()
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lock_is_named_for_the_whole_socket_name() {
+        assert_eq!(
+            lock_path(Path::new("/run/omakeel/keel.sock")),
+            Path::new("/run/omakeel/keel.sock.lock")
+        );
+        assert_ne!(
+            lock_path(Path::new("gps.sock")),
+            lock_path(Path::new("gps.other"))
+        );
+        assert_eq!(lock_path(Path::new("gps.lock")), Path::new("gps.lock.lock"));
     }
 }

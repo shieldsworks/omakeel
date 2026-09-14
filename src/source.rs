@@ -261,7 +261,14 @@ async fn tcp(source: usize, address: String, events: mpsc::Sender<Event>) {
 /// Plays a recording (`docs/protocol.md`, recordings) line by line with its
 /// original timing, then reports the source ended.
 async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
-    let file = match tokio::fs::File::open(&path).await {
+    // Only a regular file: a pipe could hang the open, and a device like
+    // /dev/zero never ends.
+    let opened = match tokio::fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => tokio::fs::File::open(&path).await,
+        Ok(_) => Err(io::Error::other("not a regular file")),
+        Err(e) => Err(e),
+    };
+    let file = match opened {
         Ok(file) => file,
         Err(e) => {
             let _ = events
@@ -275,6 +282,9 @@ async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
     let start = Instant::now();
     let mut first = None;
     loop {
+        if events.is_closed() {
+            return; // the hub is gone; don't keep scanning
+        }
         buf.clear();
         match (&mut reader)
             .take(MAX_RECORD)
@@ -377,6 +387,27 @@ mod tests {
             })
         ));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn replay_only_plays_a_regular_file() {
+        let (tx, mut rx) = mpsc::channel(8);
+        spawn(
+            0,
+            Spec::Replay {
+                path: "/dev/null".into(),
+            },
+            tx,
+        );
+        let Some(Event::Status {
+            status: SourceStatus::Error,
+            message: Some(message),
+            ..
+        }) = rx.recv().await
+        else {
+            panic!("expected an error");
+        };
+        assert!(message.contains("not a regular file"), "{message}");
     }
 
     #[tokio::test(start_paused = true)]

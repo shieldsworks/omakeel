@@ -6,7 +6,7 @@ Version 1. omakeel is the server. Every Omahoy app is a client.
 
 - A Unix stream socket, `$XDG_RUNTIME_DIR/omakeel/keel.sock` by default
   (`--socket` sets another). The directory is created with mode 0700.
-- A lock file beside the socket (`keel.lock`) keeps a second hub from
+- A lock file beside the socket (`keel.sock.lock`) keeps a second hub from
   starting on the same socket. A socket left behind by a crashed hub is
   replaced.
 - Newline-delimited JSON, UTF-8, one object per line.
@@ -98,10 +98,13 @@ never overwrites an existing file.
 
 - Lines starting with `#` are comments.
 - Every other line is Unix milliseconds, one space, then the line.
-- Lines are written on a thread of their own and synced to disk every 10
-  seconds, so a power cut loses at most the last few seconds. If the disk
-  falls far behind, lines are dropped and omakeel says so on stderr, rather
-  than stalling navigation.
+- Lines are written on a thread of their own, and each reaches the disk
+  within 10 seconds, idle or not, so a power cut loses at most the last 10
+  seconds. If the disk falls far behind, lines are dropped and omakeel says
+  so on stderr, rather than stalling navigation. A failed write or sync
+  stops the recording, with a message.
+- On exit, omakeel waits up to 5 seconds for the last lines to reach the
+  disk.
 
-`replay:FILE` plays a recording back in real time. It plays once, then the
-source reports `ended` and the fix goes stale.
+`replay:FILE` plays a recording back in real time. FILE must be a regular
+file. It plays once, then the source reports `ended` and the fix goes stale.
