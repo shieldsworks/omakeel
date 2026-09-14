@@ -77,8 +77,9 @@ One entry per `--source`, in command-line order.
   - `connecting`: nothing received yet.
   - `ok`: receiving.
   - `quiet`: nothing for 5 seconds.
-  - `error`: can't be opened or reached. It's retried every 2 seconds, and
-    `message` says why.
+  - `error`: can't be opened or reached, and `message` says why. Serial and
+    TCP sources retry every 2 seconds. A replay that can't be read stays in
+    `error`.
   - `ended`: a replay reached the end of its recording.
 - `sentences` counts lines that checked out as NMEA sentences. `rejected`
   counts the rest: bad checksums and garbage.
@@ -98,11 +99,12 @@ never overwrites an existing file.
 
 - Lines starting with `#` are comments.
 - Every other line is Unix milliseconds, one space, then the line.
-- Lines are written on a thread of their own, and each reaches the disk
-  within 10 seconds, idle or not, so a power cut loses at most the last 10
-  seconds. If the disk falls far behind, lines are dropped and omakeel says
-  so on stderr, rather than stalling navigation. A failed write or sync
-  stops the recording, with a message.
+- Lines are written on a thread of their own and synced to disk about every
+  10 seconds, idle or not. A power cut can lose the lines written since the
+  last sync, and more if the disk itself has stalled. If the disk falls far
+  behind, lines are dropped and omakeel says so on stderr, rather than
+  stalling navigation. A failed write or sync stops the recording, with a
+  message.
 - On exit, omakeel waits up to 5 seconds for the last lines to reach the
   disk.
 

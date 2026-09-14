@@ -35,8 +35,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Lines waiting for the recorder's thread. A disk this far behind loses
 /// lines, and says so, rather than stalling navigation.
 const RECORD_QUEUE: usize = 4096;
-/// A recorded line reaches the disk within this long: the most a power cut
-/// loses.
+/// How soon after a line is written the recording is synced to disk.
 const SYNC_EVERY: Duration = Duration::from_secs(10);
 /// How long exiting waits for the recording to reach the disk. A stalled
 /// disk mustn't hang shutdown.

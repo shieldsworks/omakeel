@@ -261,13 +261,20 @@ async fn tcp(source: usize, address: String, events: mpsc::Sender<Event>) {
 /// Plays a recording (`docs/protocol.md`, recordings) line by line with its
 /// original timing, then reports the source ended.
 async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
-    // Only a regular file: a pipe could hang the open, and a device like
-    // /dev/zero never ends.
-    let opened = match tokio::fs::metadata(&path).await {
-        Ok(metadata) if metadata.is_file() => tokio::fs::File::open(&path).await,
-        Ok(_) => Err(io::Error::other("not a regular file")),
-        Err(e) => Err(e),
-    };
+    // Only a regular file: a device like /dev/zero never ends. It's opened
+    // non-blocking so a pipe can't hang the open, then the opened file is
+    // what's checked, so nothing can be swapped in between.
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&path)
+        .and_then(|file| {
+            if file.metadata()?.is_file() {
+                Ok(tokio::fs::File::from_std(file))
+            } else {
+                Err(io::Error::other("not a regular file"))
+            }
+        });
     let file = match opened {
         Ok(file) => file,
         Err(e) => {
