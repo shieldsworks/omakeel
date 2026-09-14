@@ -1,0 +1,36 @@
+# `mise install` gets the toolchain; `mise tasks` lists the jobs and each
+# runs as `mise <job>`.
+
+[tools]
+rust = { version = "1.98", profile = "minimal", components = "rustfmt,clippy" }
+
+[tasks.build]
+description = "Debug build"
+run = "cargo build --locked"
+
+[tasks.test]
+description = "Unit tests and the socket test"
+run = "cargo test --locked"
+
+[tasks.lint]
+description = "rustfmt check and clippy with warnings denied"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --locked --all-targets -- -D warnings",
+]
+
+[tasks.format]
+description = "rustfmt, writing"
+run = "cargo fmt"
+
+[tasks.replay]
+description = "Run the hub on the sample sail out of Berkeley Marina"
+run = "cargo run --locked -- run --source replay:tests/fixtures/berkeley-marina.nmea"
+
+[tasks.watch]
+description = "Print the running hub's state as it changes"
+run = "cargo run --locked -- watch"
+
+[tasks.sample]
+description = "Regenerate the synthetic sample sail"
+run = "python3 scripts/sample-sail.py"
