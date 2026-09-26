@@ -3,6 +3,7 @@
 
 use crate::ais::Assembler;
 use crate::fix::{Navigation, STALE_AFTER};
+use crate::journal::{self, Journal};
 use crate::nmea;
 use crate::protocol::{FixStatus, Message, SourceState, SourceStatus, VERSION};
 use crate::source::{self, Event, Spec};
@@ -82,6 +83,7 @@ pub async fn run(config: Config) -> io::Result<()> {
     drop(tx);
 
     let mut nav = Navigation::default();
+    let mut journal = Journal::default();
     let mut traffic = Traffic::default();
     let mut clients: Vec<Client> = Vec::new();
     let mut last_state: Arc<str> = Arc::from("");
@@ -153,6 +155,28 @@ pub async fn run(config: Config) -> io::Result<()> {
             }
         }
         let fix = nav.state(now);
+        // What changed, in the recording and on stderr, so a dropout can be
+        // told apart afterwards: a link down, a link quiet, or the sky lost.
+        let mut news: Vec<String> = sources
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                journal.source(i, &t.state.name, t.state.status, t.state.message.as_deref())
+            })
+            .collect();
+        news.extend(journal.fix(&fix));
+        for text in news {
+            let ms = unix_ms();
+            eprintln!(
+                "omakeel: {} {text}",
+                journal::local_time((ms / 1000) as i64)
+            );
+            if let Some(r) = recorder.as_mut()
+                && !r.send(format!("# {ms} {text}"))
+            {
+                recorder = None;
+            }
+        }
         let states: Vec<SourceState> = sources.iter().map(|t| t.state.clone()).collect();
         let state = encode(&Message::State {
             v: VERSION,
@@ -202,6 +226,12 @@ struct Tracked {
     heard: Option<Instant>,
     /// Multi-sentence AIS messages are joined per source.
     ais: Assembler,
+}
+
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
 }
 
 fn encode(message: &Message) -> Arc<str> {
@@ -380,13 +410,16 @@ impl Recorder {
 
     /// Stamps a line and queues it. False once the recorder has stopped.
     fn record(&mut self, line: &str) -> bool {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis());
+        self.send(format!("{} {line}", unix_ms()))
+    }
+
+    /// Queues a line as it is, stamp and all. False once the recorder has
+    /// stopped.
+    fn send(&mut self, line: String) -> bool {
         let Some(lines) = &self.lines else {
             return false;
         };
-        match lines.try_send(format!("{ms} {line}")) {
+        match lines.try_send(line) {
             Ok(()) => {
                 self.behind = false;
                 true

@@ -371,7 +371,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("omakeel-replay-{}.nmea", std::process::id()));
         std::fs::write(
             &path,
-            "# omakeel recording v1\n1000 $A\n\n2000 $B\nnot a record\n3500 $C\n",
+            "# omakeel recording v1\n1000 $A\n\n# 1500 source tcp:10.0.2.2:10110 error: connection closed\n2000 $B\nnot a record\n# 3000 fix stale · last 8 satellites, hdop 1.1\n3500 $C\n",
         )
         .unwrap();
         let (tx, mut rx) = mpsc::channel(8);

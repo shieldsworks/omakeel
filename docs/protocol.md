@@ -152,8 +152,27 @@ never overwrites an existing file.
 1789333203040 $GPGGA,210003.00,3751.9000,N,12219.2000,W,1,09,0.9,2.1,M,-32.2,M,,*51
 ```
 
-- Lines starting with `#` are comments.
+- Lines starting with `#` are comments. A replay skips them.
 - Every other line is Unix milliseconds, one space, then the line.
+- The hub also writes what happened to the sources and the fix, as comments
+  stamped the same way, so a recording says why the sentences stopped:
+
+  ```
+  # 1789333260000 source tcp:10.0.2.2:10110 quiet
+  # 1789333260000 fix stale · last 8 satellites, hdop 1.1
+  # 1789333262000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
+  # 1789333290000 source tcp:10.0.2.2:10110 ok
+  # 1789333291000 fix ok · 9 satellites, hdop 0.9
+  ```
+
+  - `source NAME STATUS` each time a source's `status` changes, with
+    `: MESSAGE` after an `error`. A source that keeps failing the same way
+    as it retries is written once. After an error, each different message
+    is written once, up to 8, until the source works again.
+  - `fix STATUS` each time the fix's `status` changes, with the satellites
+    and HDOP when the hub has them. Anything but `ok` gives the last ones
+    heard, which is what the receiver could see as the fix went.
+  - The same lines go to stderr with the local time.
 - Lines are written on a thread of their own and synced to disk about every
   10 seconds, idle or not. A power cut can lose the lines written since the
   last sync, and more if the disk itself has stalled. If the disk falls far

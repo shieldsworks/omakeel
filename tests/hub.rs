@@ -162,6 +162,36 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
         recorded,
         "the recording is every line, in order"
     );
+
+    // Between the sentences, what happened to the source and the fix, in
+    // order, each stamped like a sentence.
+    let news: Vec<String> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .skip(1) // the header
+        .filter_map(|l| l.strip_prefix("# "))
+        .map(|l| {
+            let (ms, text) = l.split_once(' ').unwrap();
+            assert!(ms.parse::<u64>().is_ok(), "{l}");
+            text.to_string()
+        })
+        .collect();
+    let at = |prefix: &str| {
+        news.iter()
+            .position(|t| t.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix:?} in {news:#?}"))
+    };
+    let name = format!("source replay:{SAIL}");
+    assert!(at("fix none") < at("fix ok"));
+    assert!(at(&format!("{name} ok")) < at(&format!("{name} ended")));
+    assert!(at(&format!("{name} ended")) < at("fix stale · last 9 satellites, hdop 0.9"));
+    assert_eq!(
+        news.iter()
+            .filter(|t| t.starts_with(&format!("{name} ok")))
+            .count(),
+        1,
+        "a source that stays up is written once: {news:#?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
