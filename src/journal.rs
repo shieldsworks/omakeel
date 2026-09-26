@@ -8,16 +8,34 @@
 //! and a line on stderr each time a source's status or the fix's status
 //! changes.
 //!
-//! Only changes are written. A TCP or serial source that can't be reached
+//! Only news is written. A TCP or serial source that can't be reached
 //! retries every 2 seconds and fails the same way each time; that is one
-//! line, not one every 2 seconds for as long as the link is down.
+//! line, not one every 2 seconds for as long as the link is down. A source
+//! that is only briefly silent, like AIS on an empty bay, isn't news either.
 
+use crate::fix::STALE_AFTER;
 use crate::protocol::{FixState, FixStatus, SourceStatus};
+use std::{
+    io::{self, Write},
+    sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+    thread,
+};
+use tokio::time::{Duration, Instant};
 
 /// Different error messages remembered per outage. A link that alternates
 /// between two failures says each once; past this many, it goes quiet until
 /// it recovers rather than filling the recording.
 const MESSAGES_PER_OUTAGE: usize = 8;
+
+/// How long a source must have been quiet before that is written down. An
+/// AIS receiver on a quiet bay goes minutes between vessels and is fine; a
+/// GPS quiet this long is not.
+pub const QUIET_HOLD: Duration = Duration::from_secs(30);
+
+/// How long a link must stay up before its reconnecting is written down. A
+/// bridge that accepts and hangs up at once, as socat does with no device
+/// behind it, reconnects every 2 seconds and isn't back.
+pub const CONNECT_HOLD: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct Journal {
@@ -27,30 +45,48 @@ pub struct Journal {
 
 #[derive(Default)]
 struct Seen {
+    /// The status last written.
     status: Option<SourceStatus>,
     /// The error messages already written since the source last worked.
     errors: Vec<String>,
+    /// When the link last came up, until that is written or undone.
+    connected: Option<Instant>,
 }
 
 impl Journal {
-    /// A source's status as the hub now has it. Returns the line to write
-    /// when it is news.
+    fn seen(&mut self, index: usize) -> &mut Seen {
+        if self.sources.len() <= index {
+            self.sources.resize_with(index + 1, Seen::default);
+        }
+        &mut self.sources[index]
+    }
+
+    /// A TCP connection made or a device opened. Written only once it has
+    /// stayed up for `CONNECT_HOLD` with nothing received, because lines
+    /// arriving say it better.
+    pub fn connected(&mut self, index: usize, now: Instant) {
+        self.seen(index).connected = Some(now);
+    }
+
+    /// A source's status as the hub now has it, and how long since it last
+    /// sent a line. Returns the line to write when it is news.
     pub fn source(
         &mut self,
         index: usize,
         name: &str,
         status: SourceStatus,
         message: Option<&str>,
+        silent: Option<Duration>,
+        now: Instant,
     ) -> Option<String> {
-        if self.sources.len() <= index {
-            self.sources.resize_with(index + 1, Seen::default);
-        }
-        let seen = &mut self.sources[index];
+        let name = one_line(name);
+        let seen = self.seen(index);
         match status {
             SourceStatus::Error => {
+                seen.connected = None;
                 // One line: a message broken across two would leave half of
                 // it in the recording as if it were a received line.
-                let message = message.unwrap_or("").replace(|c: char| c.is_control(), " ");
+                let message = one_line(message.unwrap_or(""));
                 if seen.errors.contains(&message) || seen.errors.len() >= MESSAGES_PER_OUTAGE {
                     return None;
                 }
@@ -62,13 +98,53 @@ impl Journal {
                     format!("source {name} error: {message}")
                 })
             }
-            // Retrying after an error is still the same outage.
-            SourceStatus::Connecting if seen.status == Some(SourceStatus::Error) => None,
-            _ if seen.status == Some(status) => None,
-            _ => {
-                if matches!(status, SourceStatus::Ok | SourceStatus::Quiet) {
+            SourceStatus::Connecting => {
+                if let Some(at) = seen.connected {
+                    let up = now.saturating_duration_since(at);
+                    if up < CONNECT_HOLD {
+                        return None;
+                    }
+                    // Back, but silent: the link is fine and whatever is
+                    // behind it isn't talking. A different story from the
+                    // error before it.
+                    seen.connected = None;
                     seen.errors.clear();
+                    seen.status = Some(status);
+                    return Some(format!(
+                        "source {name} connected · nothing heard for {} s",
+                        up.as_secs()
+                    ));
                 }
+                // Retrying after an error is still the same outage.
+                if seen
+                    .status
+                    .is_some_and(|s| matches!(s, SourceStatus::Error | SourceStatus::Connecting))
+                {
+                    return None;
+                }
+                seen.status = Some(status);
+                Some(format!("source {name} connecting"))
+            }
+            SourceStatus::Quiet => {
+                let silent = silent.unwrap_or_default();
+                if silent < STALE_AFTER + QUIET_HOLD || seen.status == Some(status) {
+                    return None;
+                }
+                seen.errors.clear();
+                seen.status = Some(status);
+                Some(format!(
+                    "source {name} quiet · nothing for {} s",
+                    silent.as_secs()
+                ))
+            }
+            SourceStatus::Ok | SourceStatus::Ended => {
+                seen.connected = None;
+                // Quiet that never lasted long enough to be written ends
+                // without a word, so ok is only news after something else.
+                if seen.status == Some(status) {
+                    return None;
+                }
+                seen.errors.clear();
                 seen.status = Some(status);
                 Some(format!("source {name} {}", word(status)))
             }
@@ -98,6 +174,16 @@ impl Journal {
         }
         Some(line)
     }
+
+    /// Forget what was written, so every source and the fix are written
+    /// again as they stand: for when lines were lost on the way to the disk.
+    pub fn forget(&mut self) {
+        *self = Journal::default();
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.replace(|c: char| c.is_control(), " ")
 }
 
 fn word(status: SourceStatus) -> &'static str {
@@ -143,29 +229,81 @@ pub fn local_time(unix_secs: i64) -> String {
     )
 }
 
+/// Lines for stderr that haven't been written yet. Past this, they're
+/// dropped and counted.
+const STDERR_QUEUE: usize = 256;
+
+/// stderr, written on a thread of its own. `eprintln!` panics when stderr
+/// is a closed pipe or a full disk, and blocks while a pipe is full; on the
+/// hub's single-threaded runtime either would stop navigation for the sake
+/// of a log line. Here a line that can't be queued is dropped, and one that
+/// can't be written is lost, and the hub never waits.
+#[derive(Clone)]
+pub struct Stderr {
+    lines: SyncSender<String>,
+}
+
+impl Stderr {
+    pub fn spawn() -> Stderr {
+        Stderr::to(io::stderr())
+    }
+
+    pub fn to<W: Write + Send + 'static>(mut out: W) -> Stderr {
+        let (lines, rx): (SyncSender<String>, Receiver<String>) = sync_channel(STDERR_QUEUE);
+        thread::spawn(move || {
+            for line in rx {
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+            }
+        });
+        Stderr { lines }
+    }
+
+    /// Queues a line, never waiting. False when it was dropped.
+    pub fn say(&self, line: String) -> bool {
+        match self.lines.try_send(line) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const GPS: &str = "tcp:10.0.2.2:10110";
 
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// A status with no time to it: not quiet, not newly connected.
+    fn at(j: &mut Journal, status: SourceStatus, message: Option<&str>) -> Option<String> {
+        j.source(0, GPS, status, message, None, Instant::now())
+    }
+
     #[test]
     fn a_link_that_keeps_failing_the_same_way_is_one_line() {
         let mut j = Journal::default();
         assert_eq!(
-            j.source(0, GPS, SourceStatus::Connecting, None).as_deref(),
+            at(&mut j, SourceStatus::Connecting, None).as_deref(),
             Some("source tcp:10.0.2.2:10110 connecting")
         );
         let refused = Some("10.0.2.2:10110: Connection refused (os error 111)");
         assert_eq!(
-            j.source(0, GPS, SourceStatus::Error, refused).as_deref(),
+            at(&mut j, SourceStatus::Error, refused).as_deref(),
             Some(
                 "source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: Connection refused (os error 111)"
             )
         );
         for _ in 0..30 {
-            assert_eq!(j.source(0, GPS, SourceStatus::Error, refused), None);
-            assert_eq!(j.source(0, GPS, SourceStatus::Connecting, None), None);
+            assert_eq!(at(&mut j, SourceStatus::Error, refused), None);
+            assert_eq!(at(&mut j, SourceStatus::Connecting, None), None);
         }
     }
 
@@ -174,63 +312,155 @@ mod tests {
         let mut j = Journal::default();
         let closed = Some("10.0.2.2:10110: connection closed");
         let refused = Some("10.0.2.2:10110: Connection refused");
-        assert!(j.source(0, GPS, SourceStatus::Error, closed).is_some());
-        assert!(j.source(0, GPS, SourceStatus::Error, refused).is_some());
+        assert!(at(&mut j, SourceStatus::Error, closed).is_some());
+        assert!(at(&mut j, SourceStatus::Error, refused).is_some());
         // Alternating between the two says nothing more.
         for _ in 0..10 {
-            assert_eq!(j.source(0, GPS, SourceStatus::Error, closed), None);
-            assert_eq!(j.source(0, GPS, SourceStatus::Error, refused), None);
+            assert_eq!(at(&mut j, SourceStatus::Error, closed), None);
+            assert_eq!(at(&mut j, SourceStatus::Error, refused), None);
         }
         // Working again ends the outage, so the next failure is written.
         assert_eq!(
-            j.source(0, GPS, SourceStatus::Ok, None).as_deref(),
+            at(&mut j, SourceStatus::Ok, None).as_deref(),
             Some("source tcp:10.0.2.2:10110 ok")
         );
-        assert!(j.source(0, GPS, SourceStatus::Error, closed).is_some());
+        assert!(at(&mut j, SourceStatus::Error, closed).is_some());
     }
 
     #[test]
     fn a_link_with_ever_new_messages_runs_out_of_lines() {
         let mut j = Journal::default();
         let written = (0..100)
-            .filter(|n| {
-                j.source(0, GPS, SourceStatus::Error, Some(&format!("try {n}")))
-                    .is_some()
-            })
+            .filter(|n| at(&mut j, SourceStatus::Error, Some(&format!("try {n}"))).is_some())
             .count();
         assert_eq!(written, MESSAGES_PER_OUTAGE);
     }
 
     #[test]
-    fn a_message_stays_on_one_line() {
+    fn a_message_and_a_name_stay_on_one_line() {
         let mut j = Journal::default();
         let line = j
-            .source(0, GPS, SourceStatus::Error, Some("bad\n1790 $GPRMC\r"))
+            .source(
+                0,
+                "tcp:a\nb:1",
+                SourceStatus::Error,
+                Some("bad\n1790 $GPRMC\r"),
+                None,
+                t0(),
+            )
             .unwrap();
-        assert_eq!(line, "source tcp:10.0.2.2:10110 error: bad 1790 $GPRMC ");
+        assert_eq!(line, "source tcp:a b:1 error: bad 1790 $GPRMC ");
     }
 
     #[test]
-    fn quiet_and_back_is_written_both_ways() {
+    fn a_short_quiet_is_not_news_and_neither_is_its_end() {
+        // AIS on a quiet bay: a line every 20 s, quiet in between.
         let mut j = Journal::default();
-        assert!(j.source(0, GPS, SourceStatus::Ok, None).is_some());
-        assert_eq!(j.source(0, GPS, SourceStatus::Ok, None), None);
+        let now = t0();
+        assert!(at(&mut j, SourceStatus::Ok, None).is_some());
+        for _ in 0..50 {
+            let quiet = j.source(0, GPS, SourceStatus::Quiet, None, Some(secs(20)), now);
+            assert_eq!(quiet, None);
+            assert_eq!(at(&mut j, SourceStatus::Ok, None), None);
+        }
+    }
+
+    #[test]
+    fn a_long_quiet_is_written_and_so_is_its_end() {
+        let mut j = Journal::default();
+        let now = t0();
+        assert!(at(&mut j, SourceStatus::Ok, None).is_some());
+        let quiet =
+            |j: &mut Journal, s| j.source(0, GPS, SourceStatus::Quiet, None, Some(secs(s)), now);
+        assert_eq!(quiet(&mut j, 34), None);
         assert_eq!(
-            j.source(0, GPS, SourceStatus::Quiet, None).as_deref(),
-            Some("source tcp:10.0.2.2:10110 quiet")
+            quiet(&mut j, 35).as_deref(),
+            Some("source tcp:10.0.2.2:10110 quiet · nothing for 35 s")
         );
-        assert!(j.source(0, GPS, SourceStatus::Ok, None).is_some());
+        assert_eq!(quiet(&mut j, 60), None, "once");
+        assert_eq!(
+            at(&mut j, SourceStatus::Ok, None).as_deref(),
+            Some("source tcp:10.0.2.2:10110 ok")
+        );
+    }
+
+    #[test]
+    fn a_link_back_but_silent_says_so_and_clears_the_error() {
+        let mut j = Journal::default();
+        let start = t0();
+        let closed = Some("10.0.2.2:10110: connection closed");
+        let src =
+            |j: &mut Journal, status, message, now| j.source(0, GPS, status, message, None, now);
+        assert!(src(&mut j, SourceStatus::Error, closed, start).is_some());
+        // The bridge is back: the hub marks the source connecting.
+        j.connected(0, start + secs(2));
+        assert_eq!(
+            src(&mut j, SourceStatus::Connecting, None, start + secs(3)),
+            None
+        );
+        assert_eq!(
+            src(&mut j, SourceStatus::Connecting, None, start + secs(7)).as_deref(),
+            Some("source tcp:10.0.2.2:10110 connected · nothing heard for 5 s")
+        );
+        assert_eq!(
+            src(&mut j, SourceStatus::Connecting, None, start + secs(9)),
+            None
+        );
+        // It drops the same way again: news, since the link was back.
+        assert!(src(&mut j, SourceStatus::Error, closed, start + secs(20)).is_some());
+    }
+
+    #[test]
+    fn a_bridge_that_hangs_up_at_once_is_not_back() {
+        // socat with no device behind it: accept, close, every 2 s.
+        let mut j = Journal::default();
+        let start = t0();
+        let closed = Some("10.0.2.2:10110: connection closed");
+        assert!(
+            j.source(0, GPS, SourceStatus::Error, closed, None, start)
+                .is_some()
+        );
+        for n in 1..50 {
+            let now = start + secs(2 * n);
+            j.connected(0, now);
+            assert_eq!(
+                j.source(0, GPS, SourceStatus::Connecting, None, None, now),
+                None
+            );
+            let now = now + Duration::from_millis(10);
+            assert_eq!(
+                j.source(0, GPS, SourceStatus::Error, closed, None, now),
+                None
+            );
+        }
     }
 
     #[test]
     fn sources_are_judged_apart() {
         let mut j = Journal::default();
-        assert!(j.source(0, GPS, SourceStatus::Ok, None).is_some());
-        assert!(
-            j.source(1, "serial:/dev/ttyACM0:38400", SourceStatus::Ok, None)
-                .is_some()
+        let now = t0();
+        assert!(at(&mut j, SourceStatus::Ok, None).is_some());
+        let ais = j.source(
+            1,
+            "serial:/dev/ttyACM0:38400",
+            SourceStatus::Ok,
+            None,
+            None,
+            now,
         );
-        assert_eq!(j.source(0, GPS, SourceStatus::Ok, None), None);
+        assert!(ais.is_some());
+        assert_eq!(at(&mut j, SourceStatus::Ok, None), None);
+    }
+
+    #[test]
+    fn forgetting_writes_everything_again() {
+        let mut j = Journal::default();
+        let refused = Some("refused");
+        assert!(at(&mut j, SourceStatus::Error, refused).is_some());
+        assert!(j.fix(&state(FixStatus::Stale, None, None)).is_some());
+        j.forget();
+        assert!(at(&mut j, SourceStatus::Error, refused).is_some());
+        assert!(j.fix(&state(FixStatus::Stale, None, None)).is_some());
     }
 
     fn state(status: FixStatus, satellites: Option<u8>, hdop: Option<f64>) -> FixState {
@@ -270,5 +500,47 @@ mod tests {
         let stamp = local_time(1_790_012_127);
         assert_eq!(stamp.len(), 19, "{stamp}");
         assert!(stamp.starts_with("2026-09-2"), "{stamp}");
+    }
+
+    /// stderr as a pipe nobody reads: every write waits forever.
+    struct Stuck;
+    impl Write for Stuck {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            thread::sleep(Duration::from_secs(3600));
+            Ok(0)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// stderr as a pipe whose reader has gone.
+    struct Broken;
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    #[test]
+    fn a_stuck_stderr_never_holds_up_the_hub() {
+        let err = Stderr::to(Stuck);
+        let start = Instant::now();
+        let kept = (0..10_000).filter(|n| err.say(format!("line {n}"))).count();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(kept <= STDERR_QUEUE + 1, "{kept}");
+    }
+
+    #[test]
+    fn a_broken_stderr_is_shrugged_off() {
+        let err = Stderr::to(Broken);
+        for n in 0..1000 {
+            err.say(format!("line {n}"));
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert!(err.say("still here".into()), "the writer thread is alive");
     }
 }

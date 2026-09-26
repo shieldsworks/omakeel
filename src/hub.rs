@@ -3,7 +3,7 @@
 
 use crate::ais::Assembler;
 use crate::fix::{Navigation, STALE_AFTER};
-use crate::journal::{self, Journal};
+use crate::journal::{self, Journal, Stderr};
 use crate::nmea;
 use crate::protocol::{FixStatus, Message, SourceState, SourceStatus, VERSION};
 use crate::source::{self, Event, Spec};
@@ -66,7 +66,13 @@ pub fn default_socket() -> io::Result<PathBuf> {
 /// dropped.
 pub async fn run(config: Config) -> io::Result<()> {
     let (listener, _socket) = bind(&config.socket)?;
-    let mut recorder = config.record.as_deref().map(Recorder::create).transpose()?;
+    // Nothing on the hub's loop writes to stderr directly: see `Stderr`.
+    let stderr = Stderr::spawn();
+    let mut recorder = config
+        .record
+        .as_deref()
+        .map(|path| Recorder::create(path, stderr.clone()))
+        .transpose()?;
     let (tx, mut events) = mpsc::channel(1024);
     let mut sources: Vec<Tracked> = config
         .sources
@@ -128,6 +134,14 @@ pub async fn run(config: Config) -> io::Result<()> {
                     state.status = status;
                     state.message = message;
                 }
+                // Reached again, but nothing received yet: the error before
+                // it no longer stands.
+                Event::Connected { source } => {
+                    let state = &mut sources[source].state;
+                    state.status = SourceStatus::Connecting;
+                    state.message = None;
+                    journal.connected(source, Instant::now());
+                }
             },
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
@@ -138,7 +152,7 @@ pub async fn run(config: Config) -> io::Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("omakeel: accept: {e}");
+                    stderr.say(format!("omakeel: accept: {e}"));
                     sleep(Duration::from_millis(100)).await;
                 }
             },
@@ -157,22 +171,27 @@ pub async fn run(config: Config) -> io::Result<()> {
         let fix = nav.state(now);
         // What changed, in the recording and on stderr, so a dropout can be
         // told apart afterwards: a link down, a link quiet, or the sky lost.
+        // Lines lost on the way to the disk may have been some of these;
+        // write everything as it stands again.
+        if recorder.as_mut().is_some_and(Recorder::caught_up) {
+            journal.forget();
+        }
         let mut news: Vec<String> = sources
             .iter()
             .enumerate()
             .filter_map(|(i, t)| {
-                journal.source(i, &t.state.name, t.state.status, t.state.message.as_deref())
+                let silent = t.heard.map(|h| now.saturating_duration_since(h));
+                let message = t.state.message.as_deref();
+                journal.source(i, &t.state.name, t.state.status, message, silent, now)
             })
             .collect();
         news.extend(journal.fix(&fix));
         for text in news {
             let ms = unix_ms();
-            eprintln!(
-                "omakeel: {} {text}",
-                journal::local_time((ms / 1000) as i64)
-            );
+            let local = journal::local_time((ms / 1000) as i64);
+            stderr.say(format!("omakeel: {local} {text}"));
             if let Some(r) = recorder.as_mut()
-                && !r.send(format!("# {ms} {text}"))
+                && !r.send(format!("# {ms} {text}"), true)
             {
                 recorder = None;
             }
@@ -373,10 +392,15 @@ struct Recorder {
     finished: Receiver<()>,
     path: PathBuf,
     behind: bool,
+    stderr: Stderr,
+    /// A comment was dropped while the disk was behind.
+    lost_comment: bool,
+    /// The queue has taken a line since a comment was dropped.
+    caught_up: bool,
 }
 
 impl Recorder {
-    fn create(path: &Path) -> io::Result<Recorder> {
+    fn create(path: &Path, stderr: Stderr) -> io::Result<Recorder> {
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
         let file = OpenOptions::new()
             .write(true)
@@ -394,10 +418,11 @@ impl Recorder {
         let (tx, rx) = sync_channel::<String>(RECORD_QUEUE);
         let (finished_tx, finished) = channel::<()>();
         let shown = path.display().to_string();
+        let said = stderr.clone();
         thread::spawn(move || {
             let _finished = finished_tx;
             if let Err(e) = record(&mut out, &rx) {
-                eprintln!("omakeel: stopped recording to {shown}: {e}");
+                said.say(format!("omakeel: stopped recording to {shown}: {e}"));
             }
         });
         Ok(Recorder {
@@ -405,33 +430,46 @@ impl Recorder {
             finished,
             path: path.to_path_buf(),
             behind: false,
+            stderr,
+            lost_comment: false,
+            caught_up: false,
         })
     }
 
     /// Stamps a line and queues it. False once the recorder has stopped.
     fn record(&mut self, line: &str) -> bool {
-        self.send(format!("{} {line}", unix_ms()))
+        self.send(format!("{} {line}", unix_ms()), false)
+    }
+
+    /// True once, when the queue takes lines again after a comment was
+    /// dropped.
+    fn caught_up(&mut self) -> bool {
+        std::mem::take(&mut self.caught_up)
     }
 
     /// Queues a line as it is, stamp and all. False once the recorder has
     /// stopped.
-    fn send(&mut self, line: String) -> bool {
+    fn send(&mut self, line: String, comment: bool) -> bool {
         let Some(lines) = &self.lines else {
             return false;
         };
         match lines.try_send(line) {
             Ok(()) => {
                 self.behind = false;
+                if std::mem::take(&mut self.lost_comment) {
+                    self.caught_up = true;
+                }
                 true
             }
             Err(TrySendError::Full(_)) => {
                 if !self.behind {
-                    eprintln!(
+                    self.stderr.say(format!(
                         "omakeel: the disk is behind; dropping lines from {}",
                         self.path.display()
-                    );
+                    ));
                     self.behind = true;
                 }
+                self.lost_comment |= comment;
                 true
             }
             Err(TrySendError::Disconnected(_)) => false,
@@ -472,7 +510,10 @@ impl Drop for Recorder {
         // wait for it, but not forever.
         drop(self.lines.take());
         if let Err(RecvTimeoutError::Timeout) = self.finished.recv_timeout(SHUTDOWN_WAIT) {
-            eprintln!(
+            // At exit, off the loop: waiting on stderr is fine now, but a
+            // closed one must not turn exiting into a panic.
+            let _ = writeln!(
+                io::stderr(),
                 "omakeel: gave up waiting for {} to reach the disk",
                 self.path.display()
             );
@@ -483,6 +524,34 @@ impl Drop for Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dropped_comment_is_made_good_once_the_disk_catches_up() {
+        // A queue of one that nothing drains: the disk is behind.
+        let (lines, queued) = sync_channel::<String>(1);
+        let (_, finished) = channel::<()>();
+        let mut r = Recorder {
+            lines: Some(lines),
+            finished,
+            path: PathBuf::from("sail.nmea"),
+            behind: false,
+            stderr: Stderr::to(io::sink()),
+            lost_comment: false,
+            caught_up: false,
+        };
+        assert!(r.send("# 1 fix ok".into(), true));
+        assert!(r.send("2 $GPRMC".into(), false), "a sentence dropped");
+        assert!(
+            !r.caught_up(),
+            "a lost sentence needs nothing written again"
+        );
+        assert!(r.send("# 3 fix stale".into(), true), "a comment dropped");
+        assert!(!r.caught_up(), "still behind");
+        queued.recv().unwrap();
+        assert!(r.send("4 $GPRMC".into(), false));
+        assert!(r.caught_up(), "write everything as it stands again");
+        assert!(!r.caught_up(), "once");
+    }
 
     #[test]
     fn a_lock_is_named_for_the_whole_socket_name() {

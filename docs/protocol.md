@@ -76,7 +76,9 @@ One entry per `--source`, in command-line order.
 - `name` is the source as given: `serial:PATH:BAUD`, `tcp:HOST:PORT` or
   `replay:FILE`.
 - `status` is one of:
-  - `connecting`: nothing received yet.
+  - `connecting`: nothing received yet. A serial or TCP source that is
+    reached again after an `error` goes back to `connecting` until its
+    first line, so an old error doesn't stand for a link that is up.
   - `ok`: receiving.
   - `quiet`: nothing for 5 seconds.
   - `error`: can't be opened or reached, and `message` says why. Serial and
@@ -158,21 +160,35 @@ never overwrites an existing file.
   stamped the same way, so a recording says why the sentences stopped:
 
   ```
-  # 1789333260000 source tcp:10.0.2.2:10110 quiet
   # 1789333260000 fix stale · last 8 satellites, hdop 1.1
   # 1789333262000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
-  # 1789333290000 source tcp:10.0.2.2:10110 ok
-  # 1789333291000 fix ok · 9 satellites, hdop 0.9
+  # 1789333290000 source tcp:10.0.2.2:10110 connected · nothing heard for 5 s
+  # 1789333320000 source tcp:10.0.2.2:10110 ok
+  # 1789333321000 fix ok · 9 satellites, hdop 0.9
   ```
 
   - `source NAME STATUS` each time a source's `status` changes, with
     `: MESSAGE` after an `error`. A source that keeps failing the same way
     as it retries is written once. After an error, each different message
     is written once, up to 8, until the source works again.
+  - `quiet` is written only once it has lasted 30 seconds, as
+    `quiet · nothing for N s`, and the `ok` after it only if it was
+    written. An AIS receiver on an empty bay is quiet between vessels all
+    day, and that isn't news.
+  - `connected · nothing heard for N s` is a serial or TCP source reached
+    again that has stayed up 5 seconds without sending a line: the link is
+    back and whatever is behind it isn't talking. A link that is reached
+    and drops at once, as socat does with no device behind it, isn't
+    written as connected.
   - `fix STATUS` each time the fix's `status` changes, with the satellites
     and HDOP when the hub has them. Anything but `ok` gives the last ones
     heard, which is what the receiver could see as the fix went.
-  - The same lines go to stderr with the local time.
+  - The same lines go to stderr with the local time. stderr is written on
+    a thread of its own: when it is full or closed, lines are dropped and
+    navigation carries on.
+  - If the disk falls behind and a comment is dropped, every source and
+    the fix are written again as they stand once the recording catches
+    up.
 - Lines are written on a thread of their own and synced to disk about every
   10 seconds, idle or not. A power cut can lose the lines written since the
   last sync, and more if the disk itself has stalled. If the disk falls far

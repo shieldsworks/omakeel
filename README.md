@@ -85,14 +85,18 @@ grep '^#' ~/sails/2026-09-21.nmea
 
 ```
 # 1790012700000 fix stale · last 8 satellites, hdop 1.1
-# 1790012700000 source tcp:10.0.2.2:10110 quiet
 # 1790012702000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
+# 1790012730000 source tcp:10.0.2.2:10110 connected · nothing heard for 5 s
 ```
 
-A `source … quiet` or `error` line next to the stale fix means the link
-went, not the sky. A stale fix whose source stays `ok`, or a `fix nofix`, is
-the receiver itself, and its satellite count shows whether it was losing
-them first.
+- `fix nofix` is the receiver talking without a fix: the sky, or the
+  antenna. The satellite count before it shows whether it was losing them.
+- `fix stale` is no position arriving at all: the receiver went silent, or
+  the link to it did. A `source … error` or `quiet` line next to it says
+  it was the link. Quiet is only written after 30 seconds, so a dropout
+  shorter than that shows as the fix lines alone.
+- `connected · nothing heard` is the link back with nothing behind it: on
+  a VM, the Mac's bridge is up but the GPS isn't sending.
 
 Use your GPS's baud rate. Our BU-353-style puck sends at 115200; older
 pucks send at 4800. At the wrong rate no fix ever comes: if `omakeel watch`
