@@ -80,7 +80,9 @@ One entry per `--source`, in command-line order.
     reached again after an `error` goes back to `connecting` until its
     first line, so an old error doesn't stand for a link that is up.
   - `ok`: receiving.
-  - `quiet`: nothing for 5 seconds.
+  - `quiet`: nothing for 5 seconds. That includes a serial or TCP link
+    that was reached and has sent nothing for 5 seconds since: up, with
+    nothing behind it talking.
   - `error`: can't be opened or reached, and `message` says why. Serial and
     TCP sources retry every 2 seconds. A replay that can't be read stays in
     `error`.
@@ -160,7 +162,7 @@ never overwrites an existing file.
   stamped the same way, so a recording says why the sentences stopped:
 
   ```
-  # 1789333260000 fix stale · last 8 satellites, hdop 1.1
+  # 1789333260000 fix stale · last 8 satellites, hdop 1.1 · no sentences
   # 1789333262000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
   # 1789333290000 source tcp:10.0.2.2:10110 connected · nothing heard for 5 s
   # 1789333320000 source tcp:10.0.2.2:10110 ok
@@ -175,14 +177,24 @@ never overwrites an existing file.
     `quiet · nothing for N s`, and the `ok` after it only if it was
     written. An AIS receiver on an empty bay is quiet between vessels all
     day, and that isn't news.
-  - `connected · nothing heard for N s` is a serial or TCP source reached
-    again that has stayed up 5 seconds without sending a line: the link is
-    back and whatever is behind it isn't talking. A link that is reached
-    and drops at once, as socat does with no device behind it, isn't
-    written as connected.
+  - `connected · nothing heard for N s` is a serial or TCP source that was
+    reached and went `quiet` without sending a line: the link is up and
+    whatever is behind it isn't talking. It is written as soon as the
+    source goes quiet, not held like other quiet. A link that is reached
+    and drops at once, as socat does with no device behind it, never goes
+    quiet and isn't written as connected. A peer that keeps accepting,
+    sitting silent and hanging up is written once, with its error, until
+    the source sends a line.
+  - Errors already written stay remembered until the source sends a line,
+    so a link failing the same way between reconnects says it once.
   - `fix STATUS` each time the fix's `status` changes, with the satellites
     and HDOP when the hub has them. Anything but `ok` gives the last ones
-    heard, which is what the receiver could see as the fix went.
+    heard, which is what the receiver could see as the fix went. A `stale`
+    fix ends with `· no sentences` when no source that has ever given a
+    position has sent a line for 5 seconds, and `· sentences still
+    arriving` when one has (AIS doesn't count): a short
+    dropout is over before a quiet source would be written, and this says
+    which it was.
   - The same lines go to stderr with the local time. stderr is written on
     a thread of its own: when it is full or closed, lines are dropped and
     navigation carries on.

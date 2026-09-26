@@ -84,17 +84,19 @@ grep '^#' ~/sails/2026-09-21.nmea
 ```
 
 ```
-# 1790012700000 fix stale · last 8 satellites, hdop 1.1
+# 1790012700000 fix stale · last 8 satellites, hdop 1.1 · no sentences
 # 1790012702000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
 # 1790012730000 source tcp:10.0.2.2:10110 connected · nothing heard for 5 s
 ```
 
 - `fix nofix` is the receiver talking without a fix: the sky, or the
   antenna. The satellite count before it shows whether it was losing them.
-- `fix stale` is no position arriving at all: the receiver went silent, or
-  the link to it did. A `source … error` or `quiet` line next to it says
-  it was the link. Quiet is only written after 30 seconds, so a dropout
-  shorter than that shows as the fix lines alone.
+- `fix stale` is no position arriving at all. `· no sentences` means
+  nothing was arriving from anywhere: the receiver went silent, or the link
+  to it did, and a `source … error` or `quiet` line next to it says it was
+  the link. `· sentences still arriving` means lines kept coming without a
+  position in them. A quiet source is only written after 30 seconds, so a
+  shorter dropout is told by this alone.
 - `connected · nothing heard` is the link back with nothing behind it: on
   a VM, the Mac's bridge is up but the GPS isn't sending.
 

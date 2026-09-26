@@ -80,6 +80,8 @@ pub async fn run(config: Config) -> io::Result<()> {
         .map(|spec| Tracked {
             state: SourceState::new(spec.to_string()),
             heard: None,
+            connected: None,
+            positions: false,
             ais: Assembler::default(),
         })
         .collect();
@@ -114,12 +116,14 @@ pub async fn run(config: Config) -> io::Result<()> {
                     let now = Instant::now();
                     let tracked = &mut sources[source];
                     tracked.heard = Some(now);
+                    tracked.connected = None;
                     tracked.state.status = SourceStatus::Ok;
                     tracked.state.message = None;
                     match nmea::parse(&line) {
                         Ok(sentence) => {
                             tracked.state.sentences += 1;
                             if let Some(position) = nmea::position(&sentence) {
+                                tracked.positions = true;
                                 nav.update(position, now);
                             }
                             for report in tracked.ais.feed(&sentence) {
@@ -130,6 +134,7 @@ pub async fn run(config: Config) -> io::Result<()> {
                     }
                 }
                 Event::Status { source, status, message } => {
+                    sources[source].connected = None;
                     let state = &mut sources[source].state;
                     state.status = status;
                     state.message = message;
@@ -137,10 +142,12 @@ pub async fn run(config: Config) -> io::Result<()> {
                 // Reached again, but nothing received yet: the error before
                 // it no longer stands.
                 Event::Connected { source } => {
-                    let state = &mut sources[source].state;
-                    state.status = SourceStatus::Connecting;
-                    state.message = None;
-                    journal.connected(source, Instant::now());
+                    let now = Instant::now();
+                    let tracked = &mut sources[source];
+                    tracked.connected = Some(now);
+                    tracked.state.status = SourceStatus::Connecting;
+                    tracked.state.message = None;
+                    journal.connected(source, now);
                 }
             },
             accepted = listener.accept() => match accepted {
@@ -161,13 +168,29 @@ pub async fn run(config: Config) -> io::Result<()> {
 
         let now = Instant::now();
         for tracked in &mut sources {
+            // A link reached again counts as heard from then, so one that
+            // stays up and sends nothing goes quiet like one that stopped.
             let silent = tracked
-                .heard
+                .last_sign()
                 .is_some_and(|t| now.saturating_duration_since(t) >= STALE_AFTER);
-            if tracked.state.status == SourceStatus::Ok && silent {
+            let waiting = match tracked.state.status {
+                SourceStatus::Ok => true,
+                SourceStatus::Connecting => tracked.connected.is_some(),
+                _ => false,
+            };
+            if waiting && silent {
                 tracked.state.status = SourceStatus::Quiet;
             }
         }
+        // Whether a GPS is still sending anything, for a stale fix: the
+        // receiver or its link gone silent, or talking without a position.
+        // AIS arriving says nothing about the GPS, so only sources that
+        // have given a position count.
+        let arriving = sources.iter().any(|t| {
+            t.positions
+                && t.heard
+                    .is_some_and(|h| now.saturating_duration_since(h) < STALE_AFTER)
+        });
         let fix = nav.state(now);
         // What changed, in the recording and on stderr, so a dropout can be
         // told apart afterwards: a link down, a link quiet, or the sky lost.
@@ -180,12 +203,12 @@ pub async fn run(config: Config) -> io::Result<()> {
             .iter()
             .enumerate()
             .filter_map(|(i, t)| {
-                let silent = t.heard.map(|h| now.saturating_duration_since(h));
+                let silent = t.last_sign().map(|h| now.saturating_duration_since(h));
                 let message = t.state.message.as_deref();
                 journal.source(i, &t.state.name, t.state.status, message, silent, now)
             })
             .collect();
-        news.extend(journal.fix(&fix));
+        news.extend(journal.fix(&fix, arriving));
         for text in news {
             let ms = unix_ms();
             let local = journal::local_time((ms / 1000) as i64);
@@ -243,6 +266,11 @@ pub async fn run(config: Config) -> io::Result<()> {
 struct Tracked {
     state: SourceState,
     heard: Option<Instant>,
+    /// When a serial or TCP link was last reached, until its first line or
+    /// its next error.
+    connected: Option<Instant>,
+    /// Has sent a position sentence: a GPS, not only AIS.
+    positions: bool,
     /// Multi-sentence AIS messages are joined per source.
     ais: Assembler,
 }
@@ -251,6 +279,16 @@ fn unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis())
+}
+
+impl Tracked {
+    /// The last line heard, or the link being reached since.
+    fn last_sign(&self) -> Option<Instant> {
+        match (self.heard, self.connected) {
+            (Some(h), Some(c)) => Some(h.max(c)),
+            (h, c) => h.or(c),
+        }
+    }
 }
 
 fn encode(message: &Message) -> Arc<str> {

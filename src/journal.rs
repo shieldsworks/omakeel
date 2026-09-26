@@ -32,11 +32,6 @@ const MESSAGES_PER_OUTAGE: usize = 8;
 /// GPS quiet this long is not.
 pub const QUIET_HOLD: Duration = Duration::from_secs(30);
 
-/// How long a link must stay up before its reconnecting is written down. A
-/// bridge that accepts and hangs up at once, as socat does with no device
-/// behind it, reconnects every 2 seconds and isn't back.
-pub const CONNECT_HOLD: Duration = Duration::from_secs(5);
-
 #[derive(Default)]
 pub struct Journal {
     sources: Vec<Seen>,
@@ -47,10 +42,16 @@ pub struct Journal {
 struct Seen {
     /// The status last written.
     status: Option<SourceStatus>,
-    /// The error messages already written since the source last worked.
+    /// The error messages already written since the source last sent a
+    /// line.
     errors: Vec<String>,
-    /// When the link last came up, until that is written or undone.
+    /// When the link was last reached, until it sends a line, fails, or
+    /// goes quiet.
     connected: Option<Instant>,
+    /// `connected · nothing heard` has been written since the source last
+    /// sent a line. A peer that keeps accepting, sitting silent and hanging
+    /// up says so once, not once a cycle.
+    told_connected: bool,
 }
 
 impl Journal {
@@ -61,15 +62,16 @@ impl Journal {
         &mut self.sources[index]
     }
 
-    /// A TCP connection made or a device opened. Written only once it has
-    /// stayed up for `CONNECT_HOLD` with nothing received, because lines
-    /// arriving say it better.
+    /// A TCP connection made or a device opened. Nothing is written yet:
+    /// lines arriving say it better, and if none do the hub turns the
+    /// source `quiet`, which is when it is written.
     pub fn connected(&mut self, index: usize, now: Instant) {
         self.seen(index).connected = Some(now);
     }
 
     /// A source's status as the hub now has it, and how long since it last
-    /// sent a line. Returns the line to write when it is news.
+    /// sent a line or was reached. Returns the line to write when it is
+    /// news.
     pub fn source(
         &mut self,
         index: usize,
@@ -99,26 +101,12 @@ impl Journal {
                 })
             }
             SourceStatus::Connecting => {
-                if let Some(at) = seen.connected {
-                    let up = now.saturating_duration_since(at);
-                    if up < CONNECT_HOLD {
-                        return None;
-                    }
-                    // Back, but silent: the link is fine and whatever is
-                    // behind it isn't talking. A different story from the
-                    // error before it.
-                    seen.connected = None;
-                    seen.errors.clear();
-                    seen.status = Some(status);
-                    return Some(format!(
-                        "source {name} connected · nothing heard for {} s",
-                        up.as_secs()
-                    ));
-                }
-                // Retrying after an error is still the same outage.
-                if seen
-                    .status
-                    .is_some_and(|s| matches!(s, SourceStatus::Error | SourceStatus::Connecting))
+                // Reached and waiting for a first line, or retrying after an
+                // error: either way, the same outage.
+                if seen.connected.is_some()
+                    || seen.status.is_some_and(|s| {
+                        matches!(s, SourceStatus::Error | SourceStatus::Connecting)
+                    })
                 {
                     return None;
                 }
@@ -126,11 +114,23 @@ impl Journal {
                 Some(format!("source {name} connecting"))
             }
             SourceStatus::Quiet => {
+                if let Some(at) = seen.connected.take() {
+                    // Reached, and silent ever since: the link is fine and
+                    // whatever is behind it isn't talking. A different story
+                    // from the error before it, so it isn't held back.
+                    seen.status = Some(status);
+                    if std::mem::replace(&mut seen.told_connected, true) {
+                        return None;
+                    }
+                    return Some(format!(
+                        "source {name} connected · nothing heard for {} s",
+                        now.saturating_duration_since(at).as_secs()
+                    ));
+                }
                 let silent = silent.unwrap_or_default();
                 if silent < STALE_AFTER + QUIET_HOLD || seen.status == Some(status) {
                     return None;
                 }
-                seen.errors.clear();
                 seen.status = Some(status);
                 Some(format!(
                     "source {name} quiet · nothing for {} s",
@@ -139,23 +139,31 @@ impl Journal {
             }
             SourceStatus::Ok | SourceStatus::Ended => {
                 seen.connected = None;
+                // A line arrived: whatever went wrong before is over.
+                seen.errors.clear();
+                seen.told_connected = false;
                 // Quiet that never lasted long enough to be written ends
                 // without a word, so ok is only news after something else.
                 if seen.status == Some(status) {
                     return None;
                 }
-                seen.errors.clear();
                 seen.status = Some(status);
                 Some(format!("source {name} {}", word(status)))
             }
         }
     }
 
-    /// The fix as the hub now judges it. Returns the line to write when its
-    /// status has changed. The satellites and HDOP go with it, because a
-    /// receiver losing the sky loses satellites first: a stale fix that
-    /// last had 4 satellites is a different story from one that had 11.
-    pub fn fix(&mut self, fix: &FixState) -> Option<String> {
+    /// The fix as the hub now judges it, and whether any source has sent a
+    /// line in the last `STALE_AFTER`. Returns the line to write when its
+    /// status has changed.
+    ///
+    /// The satellites and HDOP go with it, because a receiver losing the sky
+    /// loses satellites first: a stale fix that last had 4 satellites is a
+    /// different story from one that had 11. A stale fix also says whether
+    /// sentences were still arriving, since a quiet link is only written
+    /// after `QUIET_HOLD` and a short dropout would otherwise say nothing
+    /// about which it was.
+    pub fn fix(&mut self, fix: &FixState, arriving: bool) -> Option<String> {
         if self.fix == Some(fix.status) {
             return None;
         }
@@ -172,13 +180,26 @@ impl Journal {
             (None, Some(h)) => line.push_str(&format!(" · {last}hdop {h}")),
             (None, None) => {}
         }
+        if fix.status == FixStatus::Stale {
+            line.push_str(if arriving {
+                " · sentences still arriving"
+            } else {
+                " · no sentences"
+            });
+        }
         Some(line)
     }
 
     /// Forget what was written, so every source and the fix are written
     /// again as they stand: for when lines were lost on the way to the disk.
+    /// A link still waiting on its first line stays waiting.
     pub fn forget(&mut self) {
-        *self = Journal::default();
+        self.fix = None;
+        for seen in &mut self.sources {
+            seen.status = None;
+            seen.errors.clear();
+            seen.told_connected = false;
+        }
     }
 }
 
@@ -385,29 +406,60 @@ mod tests {
     }
 
     #[test]
-    fn a_link_back_but_silent_says_so_and_clears_the_error() {
+    fn a_link_back_but_silent_says_so_when_it_goes_quiet() {
         let mut j = Journal::default();
         let start = t0();
         let closed = Some("10.0.2.2:10110: connection closed");
         let src =
             |j: &mut Journal, status, message, now| j.source(0, GPS, status, message, None, now);
         assert!(src(&mut j, SourceStatus::Error, closed, start).is_some());
-        // The bridge is back: the hub marks the source connecting.
+        // The bridge is back: the hub marks the source connecting...
         j.connected(0, start + secs(2));
         assert_eq!(
             src(&mut j, SourceStatus::Connecting, None, start + secs(3)),
             None
         );
+        // ...then quiet once it has sent nothing for 5 s, and that is
+        // written at once, not after the quiet hold.
         assert_eq!(
-            src(&mut j, SourceStatus::Connecting, None, start + secs(7)).as_deref(),
+            src(&mut j, SourceStatus::Quiet, None, start + secs(7)).as_deref(),
             Some("source tcp:10.0.2.2:10110 connected · nothing heard for 5 s")
         );
         assert_eq!(
-            src(&mut j, SourceStatus::Connecting, None, start + secs(9)),
+            src(&mut j, SourceStatus::Quiet, None, start + secs(9)),
             None
         );
-        // It drops the same way again: news, since the link was back.
-        assert!(src(&mut j, SourceStatus::Error, closed, start + secs(20)).is_some());
+        // A line at last.
+        assert_eq!(
+            src(&mut j, SourceStatus::Ok, None, start + secs(20)).as_deref(),
+            Some("source tcp:10.0.2.2:10110 ok")
+        );
+    }
+
+    #[test]
+    fn a_peer_that_sits_silent_and_hangs_up_says_so_once() {
+        // Connect, nothing for more than 5 s, close; over and over.
+        let mut j = Journal::default();
+        let start = t0();
+        let closed = Some("10.0.2.2:10110: connection closed");
+        let mut written = Vec::new();
+        let mut now = start;
+        for _ in 0..20 {
+            written.extend(j.source(0, GPS, SourceStatus::Error, closed, None, now));
+            now += secs(2);
+            j.connected(0, now);
+            written.extend(j.source(0, GPS, SourceStatus::Connecting, None, None, now));
+            now += secs(6);
+            written.extend(j.source(0, GPS, SourceStatus::Quiet, None, Some(secs(6)), now));
+            now += secs(1);
+        }
+        assert_eq!(
+            written,
+            [
+                "source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed",
+                "source tcp:10.0.2.2:10110 connected · nothing heard for 6 s",
+            ]
+        );
     }
 
     #[test]
@@ -457,10 +509,30 @@ mod tests {
         let mut j = Journal::default();
         let refused = Some("refused");
         assert!(at(&mut j, SourceStatus::Error, refused).is_some());
-        assert!(j.fix(&state(FixStatus::Stale, None, None)).is_some());
+        assert!(j.fix(&state(FixStatus::Stale, None, None), false).is_some());
         j.forget();
         assert!(at(&mut j, SourceStatus::Error, refused).is_some());
-        assert!(j.fix(&state(FixStatus::Stale, None, None)).is_some());
+        assert!(j.fix(&state(FixStatus::Stale, None, None), false).is_some());
+    }
+
+    #[test]
+    fn forgetting_keeps_a_link_waiting_on_its_first_line() {
+        let mut j = Journal::default();
+        let start = t0();
+        j.connected(0, start);
+        j.forget();
+        assert_eq!(
+            j.source(
+                0,
+                GPS,
+                SourceStatus::Quiet,
+                None,
+                Some(secs(5)),
+                start + secs(5)
+            )
+            .as_deref(),
+            Some("source tcp:10.0.2.2:10110 connected · nothing heard for 5 s")
+        );
     }
 
     fn state(status: FixStatus, satellites: Option<u8>, hdop: Option<f64>) -> FixState {
@@ -475,23 +547,28 @@ mod tests {
     fn the_fix_is_written_when_its_status_changes_with_the_sky_it_had() {
         let mut j = Journal::default();
         assert_eq!(
-            j.fix(&state(FixStatus::None, None, None)).as_deref(),
+            j.fix(&state(FixStatus::None, None, None), false).as_deref(),
             Some("fix none")
         );
         assert_eq!(
-            j.fix(&state(FixStatus::Ok, Some(9), Some(0.9))).as_deref(),
+            j.fix(&state(FixStatus::Ok, Some(9), Some(0.9)), true)
+                .as_deref(),
             Some("fix ok · 9 satellites, hdop 0.9")
         );
         // Satellites coming and going aren't news on their own.
-        assert_eq!(j.fix(&state(FixStatus::Ok, Some(7), Some(1.4))), None);
+        assert_eq!(j.fix(&state(FixStatus::Ok, Some(7), Some(1.4)), true), None);
         assert_eq!(
-            j.fix(&state(FixStatus::Stale, Some(4), Some(3.1)))
+            j.fix(&state(FixStatus::Stale, Some(4), Some(3.1)), false)
                 .as_deref(),
-            Some("fix stale · last 4 satellites, hdop 3.1")
+            Some("fix stale · last 4 satellites, hdop 3.1 · no sentences")
         );
         assert_eq!(
-            j.fix(&state(FixStatus::Nofix, None, None)).as_deref(),
+            j.fix(&state(FixStatus::Nofix, None, None), true).as_deref(),
             Some("fix nofix")
+        );
+        assert_eq!(
+            j.fix(&state(FixStatus::Stale, None, None), true).as_deref(),
+            Some("fix stale · sentences still arriving")
         );
     }
 

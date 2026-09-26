@@ -184,7 +184,9 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
     let name = format!("source replay:{SAIL}");
     assert!(at("fix none") < at("fix ok"));
     assert!(at(&format!("{name} ok")) < at(&format!("{name} ended")));
-    assert!(at(&format!("{name} ended")) < at("fix stale · last 9 satellites, hdop 0.9"));
+    assert!(
+        at(&format!("{name} ended")) < at("fix stale · last 9 satellites, hdop 0.9 · no sentences")
+    );
     assert_eq!(
         news.iter()
             .filter(|t| t.starts_with(&format!("{name} ok")))
@@ -245,5 +247,52 @@ async fn recording_never_overwrites_a_sail() {
     assert_eq!(
         std::fs::read_to_string(record).unwrap(),
         "yesterday's sail\n"
+    );
+}
+
+/// A bridge that is up with nothing behind it: the Mac's socat accepting,
+/// the GPS unplugged. The app sees the source quiet, and the recording says
+/// the link was reached, not that it was down. Real time: about 6 s.
+#[tokio::test]
+async fn a_link_up_with_nothing_behind_it_goes_quiet() {
+    let dir = scratch("silent-link");
+    let socket = dir.join("keel.sock");
+    let record = dir.join("recorded.nmea");
+    let bridge = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = bridge.local_addr().unwrap().to_string();
+    let held = tokio::spawn(async move {
+        let (stream, _) = bridge.accept().await.unwrap();
+        sleep(Duration::from_secs(60)).await;
+        drop(stream);
+    });
+    let config = Config {
+        sources: vec![Spec::Tcp {
+            address: address.clone(),
+        }],
+        socket: socket.clone(),
+        record: Some(record.clone()),
+    };
+    let hub = tokio::spawn(hub::run(config));
+    let mut lines = connect(&socket).await;
+    let quiet = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = next(&mut lines).await;
+            if state["type"] == "state" && state["sources"][0]["status"] == "quiet" {
+                break state;
+            }
+        }
+    })
+    .await
+    .expect("the source should go quiet");
+    assert!(quiet["sources"][0]["message"].is_null());
+    hub.abort();
+    let _ = hub.await;
+    held.abort();
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        text.contains(&format!(
+            "source tcp:{address} connected · nothing heard for 5 s"
+        )),
+        "{text}"
     );
 }
