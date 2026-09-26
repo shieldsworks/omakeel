@@ -4,6 +4,7 @@
 pub mod ais;
 pub mod fix;
 pub mod hub;
+pub mod journal;
 pub mod nmea;
 pub mod protocol;
 pub mod source;

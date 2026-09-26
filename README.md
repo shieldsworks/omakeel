@@ -29,6 +29,10 @@ sail so far.
 - Records every line it receives, AIS included, with the time it arrived.
   Replays those recordings in real time, so the apps can be developed at the
   dock.
+- Writes down why the GPS dropped. Each time a source goes quiet, fails or
+  comes back, and each time the fix goes stale or returns, a line goes into
+  the recording and onto stderr. So after a sail you can tell a receiver
+  that lost the sky from a cable or network link that went away.
 
 ## Use
 
@@ -72,6 +76,29 @@ target/debug/omakeel run \
   --source serial:/dev/ttyACM0:38400 \
   --record ~/sails/$(date +%F).nmea
 ```
+
+To see why the fix dropped on a sail, read the comment lines:
+
+```sh
+grep '^#' ~/sails/2026-09-21.nmea
+```
+
+```
+# 1790012700000 fix stale · last 8 satellites, hdop 1.1 · no sentences
+# 1790012702000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
+# 1790012730000 source tcp:10.0.2.2:10110 connected · nothing heard for 5 s
+```
+
+- `fix nofix` is the receiver talking without a fix: the sky, or the
+  antenna. The satellite count before it shows whether it was losing them.
+- `fix stale` is no position arriving at all. `· no sentences` means
+  nothing was arriving from anywhere: the receiver went silent, or the link
+  to it did, and a `source … error` or `quiet` line next to it says it was
+  the link. `· sentences still arriving` means lines kept coming without a
+  position in them. A quiet source is only written after 30 seconds, so a
+  shorter dropout is told by this alone.
+- `connected · nothing heard` is the link back with nothing behind it: on
+  a VM, the Mac's bridge is up but the GPS isn't sending.
 
 Use your GPS's baud rate. Our BU-353-style puck sends at 115200; older
 pucks send at 4800. At the wrong rate no fix ever comes: if `omakeel watch`

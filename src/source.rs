@@ -38,6 +38,10 @@ pub enum Event {
         status: SourceStatus,
         message: Option<String>,
     },
+    /// A TCP connection made or a serial device opened, before any line.
+    Connected {
+        source: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +140,9 @@ fn failed(source: usize, message: String) -> Event {
 fn serial(source: usize, path: &Path, baud: u32, events: &mpsc::Sender<Event>) {
     loop {
         let result = open_serial(path, baud).and_then(|device| {
+            if events.blocking_send(Event::Connected { source }).is_err() {
+                return Ok(()); // the hub is gone
+            }
             let mut reader = BufReader::new(device);
             let mut buf = Vec::new();
             loop {
@@ -220,6 +227,9 @@ async fn tcp(source: usize, address: String, events: mpsc::Sender<Event>) {
         };
         let error = match connected {
             Ok(stream) => {
+                if events.send(Event::Connected { source }).await.is_err() {
+                    return;
+                }
                 let mut reader = AsyncBufReader::new(stream);
                 let mut buf = Vec::new();
                 loop {
@@ -371,7 +381,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("omakeel-replay-{}.nmea", std::process::id()));
         std::fs::write(
             &path,
-            "# omakeel recording v1\n1000 $A\n\n2000 $B\nnot a record\n3500 $C\n",
+            "# omakeel recording v1\n1000 $A\n\n# 1500 source tcp:10.0.2.2:10110 error: connection closed\n2000 $B\nnot a record\n# 3000 fix stale · last 8 satellites, hdop 1.1\n3500 $C\n",
         )
         .unwrap();
         let (tx, mut rx) = mpsc::channel(8);

@@ -76,9 +76,13 @@ One entry per `--source`, in command-line order.
 - `name` is the source as given: `serial:PATH:BAUD`, `tcp:HOST:PORT` or
   `replay:FILE`.
 - `status` is one of:
-  - `connecting`: nothing received yet.
+  - `connecting`: nothing received yet. A serial or TCP source that is
+    reached again after an `error` goes back to `connecting` until its
+    first line, so an old error doesn't stand for a link that is up.
   - `ok`: receiving.
-  - `quiet`: nothing for 5 seconds.
+  - `quiet`: nothing for 5 seconds. That includes a serial or TCP link
+    that was reached and has sent nothing for 5 seconds since: up, with
+    nothing behind it talking.
   - `error`: can't be opened or reached, and `message` says why. Serial and
     TCP sources retry every 2 seconds. A replay that can't be read stays in
     `error`.
@@ -152,8 +156,55 @@ never overwrites an existing file.
 1789333203040 $GPGGA,210003.00,3751.9000,N,12219.2000,W,1,09,0.9,2.1,M,-32.2,M,,*51
 ```
 
-- Lines starting with `#` are comments.
+- Lines starting with `#` are comments. A replay skips them.
 - Every other line is Unix milliseconds, one space, then the line.
+- The hub also writes what happened to the sources and the fix, as comments
+  stamped the same way, so a recording says why the sentences stopped:
+
+  ```
+  # 1789333260000 fix stale · last 8 satellites, hdop 1.1 · no sentences
+  # 1789333262000 source tcp:10.0.2.2:10110 error: 10.0.2.2:10110: connection closed
+  # 1789333290000 source tcp:10.0.2.2:10110 connected · nothing heard for 5 s
+  # 1789333320000 source tcp:10.0.2.2:10110 ok
+  # 1789333321000 fix ok · 9 satellites, hdop 0.9
+  ```
+
+  - `source NAME STATUS` each time a source's `status` changes, with
+    `: MESSAGE` after an `error`. A source that keeps failing the same way
+    as it retries is written once. After an error, each different message
+    is written once, up to 8, until the source works again.
+  - `quiet` is written only once it has lasted 30 seconds, as
+    `quiet · nothing for N s`, and the `ok` after it only if it was
+    written. An AIS receiver on an empty bay is quiet between vessels all
+    day, and that isn't news.
+  - `connected · nothing heard for N s` is a serial or TCP source that was
+    reached and went `quiet` without sending a line: the link is up and
+    whatever is behind it isn't talking. It is written as soon as the
+    source goes quiet, not held like other quiet. A link that is reached
+    and drops at once, as socat does with no device behind it, never goes
+    quiet and isn't written as connected. A peer that keeps accepting,
+    sitting silent and hanging up is written once, with its error, until
+    the source sends a line.
+  - Errors already written stay remembered until the source sends a line,
+    so a link failing the same way between reconnects says it once.
+  - `fix STATUS` each time the fix's `status` changes, with the satellites
+    and HDOP when the hub has them. Anything but `ok` gives the last ones
+    heard, which is what the receiver could see as the fix went. A `stale`
+    fix ends with `· sentences still arriving` when a source that has
+    given a position has sent a line other than AIS in the last 5 seconds
+    and at least 2 seconds after its last position, and `· no sentences`
+    otherwise. AIS lines (`!AIVDM` and the rest starting with `!`) never
+    count, even on a source that carries the GPS too, such as a
+    multiplexer; neither does the GSV, GSA or VTG that trails a receiver's
+    position by up to a second: a short
+    dropout is over before a quiet source would be written, and this says
+    which it was.
+  - The same lines go to stderr with the local time. stderr is written on
+    a thread of its own: when it is full or closed, lines are dropped and
+    navigation carries on.
+  - If the disk falls behind and a comment is dropped, every source and
+    the fix are written again as they stand once the recording catches
+    up.
 - Lines are written on a thread of their own and synced to disk about every
   10 seconds, idle or not. A power cut can lose the lines written since the
   last sync, and more if the disk itself has stalled. If the disk falls far

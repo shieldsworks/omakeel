@@ -162,6 +162,38 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
         recorded,
         "the recording is every line, in order"
     );
+
+    // Between the sentences, what happened to the source and the fix, in
+    // order, each stamped like a sentence.
+    let news: Vec<String> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .skip(1) // the header
+        .filter_map(|l| l.strip_prefix("# "))
+        .map(|l| {
+            let (ms, text) = l.split_once(' ').unwrap();
+            assert!(ms.parse::<u64>().is_ok(), "{l}");
+            text.to_string()
+        })
+        .collect();
+    let at = |prefix: &str| {
+        news.iter()
+            .position(|t| t.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix:?} in {news:#?}"))
+    };
+    let name = format!("source replay:{SAIL}");
+    assert!(at("fix none") < at("fix ok"));
+    assert!(at(&format!("{name} ok")) < at(&format!("{name} ended")));
+    assert!(
+        at(&format!("{name} ended")) < at("fix stale · last 9 satellites, hdop 0.9 · no sentences")
+    );
+    assert_eq!(
+        news.iter()
+            .filter(|t| t.starts_with(&format!("{name} ok")))
+            .count(),
+        1,
+        "a source that stays up is written once: {news:#?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -216,4 +248,115 @@ async fn recording_never_overwrites_a_sail() {
         std::fs::read_to_string(record).unwrap(),
         "yesterday's sail\n"
     );
+}
+
+/// A bridge that is up with nothing behind it: the Mac's socat accepting,
+/// the GPS unplugged. The app sees the source quiet, and the recording says
+/// the link was reached, not that it was down. Real time: about 6 s.
+#[tokio::test]
+async fn a_link_up_with_nothing_behind_it_goes_quiet() {
+    let dir = scratch("silent-link");
+    let socket = dir.join("keel.sock");
+    let record = dir.join("recorded.nmea");
+    let bridge = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = bridge.local_addr().unwrap().to_string();
+    let held = tokio::spawn(async move {
+        let (stream, _) = bridge.accept().await.unwrap();
+        sleep(Duration::from_secs(60)).await;
+        drop(stream);
+    });
+    let config = Config {
+        sources: vec![Spec::Tcp {
+            address: address.clone(),
+        }],
+        socket: socket.clone(),
+        record: Some(record.clone()),
+    };
+    let hub = tokio::spawn(hub::run(config));
+    let mut lines = connect(&socket).await;
+    let quiet = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = next(&mut lines).await;
+            if state["type"] == "state" && state["sources"][0]["status"] == "quiet" {
+                break state;
+            }
+        }
+    })
+    .await
+    .expect("the source should go quiet");
+    assert!(quiet["sources"][0]["message"].is_null());
+    hub.abort();
+    let _ = hub.await;
+    held.abort();
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        text.contains(&format!(
+            "source tcp:{address} connected · nothing heard for 5 s"
+        )),
+        "{text}"
+    );
+}
+
+/// The comment on a stale fix: whether the GPS was still talking.
+async fn stale_comment(name: &str, recording: &str) -> String {
+    let dir = scratch(name);
+    let sail = dir.join("sail.nmea");
+    std::fs::write(&sail, recording).unwrap();
+    let record = dir.join("recorded.nmea");
+    let config = Config {
+        sources: vec![Spec::Replay { path: sail }],
+        socket: dir.join("keel.sock"),
+        record: Some(record.clone()),
+    };
+    let hub = tokio::spawn(hub::run(config));
+    sleep(Duration::from_secs(30)).await;
+    hub.abort();
+    let _ = hub.await;
+    std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .find_map(|l| l.split_once(" fix stale").map(|(_, rest)| rest.to_string()))
+        .expect("the fix should go stale")
+}
+
+const RMC_3: &str = "$GPRMC,210003.00,A,3751.9000,N,12219.2000,W,5.0,255.0,130926,,,A*46";
+const RMC_4: &str = "$GPRMC,210004.00,A,3751.8996,N,12219.2017,W,5.0,255.0,130926,,,A*40";
+
+#[tokio::test(start_paused = true)]
+async fn a_bursts_trailing_satellites_are_not_the_gps_still_talking() {
+    // Each second: the position, then GSV nearly a second behind it. Then
+    // the receiver dies after one last burst.
+    let recording = format!(
+        "# omakeel recording v1\n500 {RMC_3}\n1400 $GPGSV,3,3,09*00\n1500 {RMC_4}\n2400 $GPGSV,3,3,09*00\n"
+    );
+    assert_eq!(
+        stale_comment("trailing-gsv", &recording).await,
+        " · no sentences"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_receiver_talking_without_a_position_is_still_arriving() {
+    // The position stops, but the receiver goes on sending satellites.
+    let mut recording = format!("# omakeel recording v1\n500 {RMC_3}\n1500 {RMC_4}\n");
+    for n in 2..12 {
+        recording.push_str(&format!("{} $GPGSV,3,3,09*00\n", 500 + n * 1000));
+    }
+    assert_eq!(
+        stale_comment("gsv-only", &recording).await,
+        " · sentences still arriving"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn ais_on_the_gpss_own_stream_is_not_the_gps_still_talking() {
+    // A multiplexer: GPS and AIS on one stream. The GPS stops; AIS goes on.
+    let mut recording = format!("# omakeel recording v1\n500 {RMC_3}\n1500 {RMC_4}\n");
+    for n in 2..12 {
+        recording.push_str(&format!(
+            "{} !AIVDM,1,1,,A,15M67FC000G?ufbE`FepT@3n00Sa,0*5C\n",
+            500 + n * 1000
+        ));
+    }
+    assert_eq!(stale_comment("mux", &recording).await, " · no sentences");
 }
