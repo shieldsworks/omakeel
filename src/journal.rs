@@ -48,7 +48,9 @@ impl Journal {
         let seen = &mut self.sources[index];
         match status {
             SourceStatus::Error => {
-                let message = message.unwrap_or("").to_string();
+                // One line: a message broken across two would leave half of
+                // it in the recording as if it were a received line.
+                let message = message.unwrap_or("").replace(|c: char| c.is_control(), " ");
                 if seen.errors.contains(&message) || seen.errors.len() >= MESSAGES_PER_OUTAGE {
                     return None;
                 }
@@ -197,6 +199,15 @@ mod tests {
             })
             .count();
         assert_eq!(written, MESSAGES_PER_OUTAGE);
+    }
+
+    #[test]
+    fn a_message_stays_on_one_line() {
+        let mut j = Journal::default();
+        let line = j
+            .source(0, GPS, SourceStatus::Error, Some("bad\n1790 $GPRMC\r"))
+            .unwrap();
+        assert_eq!(line, "source tcp:10.0.2.2:10110 error: bad 1790 $GPRMC ");
     }
 
     #[test]
