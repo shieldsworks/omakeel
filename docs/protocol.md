@@ -191,10 +191,12 @@ never overwrites an existing file.
     and HDOP when the hub has them. Anything but `ok` gives the last ones
     heard, which is what the receiver could see as the fix went. A `stale`
     fix ends with `· sentences still arriving` when a source that has
-    given a position has sent a line in the last 5 seconds and at least 2
-    seconds after its last position, and `· no sentences` otherwise. AIS
-    doesn't count, and neither does the GSV, GSA or VTG that trails a
-    receiver's position by up to a second: a short
+    given a position has sent a line other than AIS in the last 5 seconds
+    and at least 2 seconds after its last position, and `· no sentences`
+    otherwise. AIS lines (`!AIVDM` and the rest starting with `!`) never
+    count, even on a source that carries the GPS too, such as a
+    multiplexer; neither does the GSV, GSA or VTG that trails a receiver's
+    position by up to a second: a short
     dropout is over before a quiet source would be written, and this says
     which it was.
   - The same lines go to stderr with the local time. stderr is written on

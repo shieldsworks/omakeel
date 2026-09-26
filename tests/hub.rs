@@ -347,3 +347,16 @@ async fn a_receiver_talking_without_a_position_is_still_arriving() {
         " · sentences still arriving"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn ais_on_the_gpss_own_stream_is_not_the_gps_still_talking() {
+    // A multiplexer: GPS and AIS on one stream. The GPS stops; AIS goes on.
+    let mut recording = format!("# omakeel recording v1\n500 {RMC_3}\n1500 {RMC_4}\n");
+    for n in 2..12 {
+        recording.push_str(&format!(
+            "{} !AIVDM,1,1,,A,15M67FC000G?ufbE`FepT@3n00Sa,0*5C\n",
+            500 + n * 1000
+        ));
+    }
+    assert_eq!(stale_comment("mux", &recording).await, " · no sentences");
+}

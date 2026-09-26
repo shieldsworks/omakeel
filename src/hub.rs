@@ -83,6 +83,7 @@ pub async fn run(config: Config) -> io::Result<()> {
         .map(|spec| Tracked {
             state: SourceState::new(spec.to_string()),
             heard: None,
+            heard_gps: None,
             connected: None,
             last_position: None,
             ais: Assembler::default(),
@@ -119,6 +120,10 @@ pub async fn run(config: Config) -> io::Result<()> {
                     let now = Instant::now();
                     let tracked = &mut sources[source];
                     tracked.heard = Some(now);
+                    // `!` is AIS; anything else could be the GPS talking.
+                    if !line.starts_with('!') {
+                        tracked.heard_gps = Some(now);
+                    }
                     tracked.connected = None;
                     tracked.state.status = SourceStatus::Ok;
                     tracked.state.message = None;
@@ -191,13 +196,15 @@ pub async fn run(config: Config) -> io::Result<()> {
         // have given a position count, and only lines well after their last
         // position: a receiver's burst trails GSV, GSA or VTG up to a second
         // behind the fix, and that tail isn't the receiver still talking.
-        let arriving = sources.iter().any(|t| match (t.last_position, t.heard) {
-            (Some(position), Some(heard)) => {
-                heard.saturating_duration_since(position) >= STILL_TALKING
-                    && now.saturating_duration_since(heard) < STALE_AFTER
-            }
-            _ => false,
-        });
+        let arriving = sources
+            .iter()
+            .any(|t| match (t.last_position, t.heard_gps) {
+                (Some(position), Some(heard)) => {
+                    heard.saturating_duration_since(position) >= STILL_TALKING
+                        && now.saturating_duration_since(heard) < STALE_AFTER
+                }
+                _ => false,
+            });
         let fix = nav.state(now);
         // What changed, in the recording and on stderr, so a dropout can be
         // told apart afterwards: a link down, a link quiet, or the sky lost.
@@ -273,6 +280,9 @@ pub async fn run(config: Config) -> io::Result<()> {
 struct Tracked {
     state: SourceState,
     heard: Option<Instant>,
+    /// The last line that wasn't AIS, for a source carrying both: AIS
+    /// arriving on a multiplexer says nothing about the GPS behind it.
+    heard_gps: Option<Instant>,
     /// When a serial or TCP link was last reached, until its first line or
     /// its next error.
     connected: Option<Instant>,
