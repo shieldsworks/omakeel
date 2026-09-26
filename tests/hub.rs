@@ -296,3 +296,54 @@ async fn a_link_up_with_nothing_behind_it_goes_quiet() {
         "{text}"
     );
 }
+
+/// The comment on a stale fix: whether the GPS was still talking.
+async fn stale_comment(name: &str, recording: &str) -> String {
+    let dir = scratch(name);
+    let sail = dir.join("sail.nmea");
+    std::fs::write(&sail, recording).unwrap();
+    let record = dir.join("recorded.nmea");
+    let config = Config {
+        sources: vec![Spec::Replay { path: sail }],
+        socket: dir.join("keel.sock"),
+        record: Some(record.clone()),
+    };
+    let hub = tokio::spawn(hub::run(config));
+    sleep(Duration::from_secs(30)).await;
+    hub.abort();
+    let _ = hub.await;
+    std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .find_map(|l| l.split_once(" fix stale").map(|(_, rest)| rest.to_string()))
+        .expect("the fix should go stale")
+}
+
+const RMC_3: &str = "$GPRMC,210003.00,A,3751.9000,N,12219.2000,W,5.0,255.0,130926,,,A*46";
+const RMC_4: &str = "$GPRMC,210004.00,A,3751.8996,N,12219.2017,W,5.0,255.0,130926,,,A*40";
+
+#[tokio::test(start_paused = true)]
+async fn a_bursts_trailing_satellites_are_not_the_gps_still_talking() {
+    // Each second: the position, then GSV nearly a second behind it. Then
+    // the receiver dies after one last burst.
+    let recording = format!(
+        "# omakeel recording v1\n500 {RMC_3}\n1400 $GPGSV,3,3,09*00\n1500 {RMC_4}\n2400 $GPGSV,3,3,09*00\n"
+    );
+    assert_eq!(
+        stale_comment("trailing-gsv", &recording).await,
+        " · no sentences"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_receiver_talking_without_a_position_is_still_arriving() {
+    // The position stops, but the receiver goes on sending satellites.
+    let mut recording = format!("# omakeel recording v1\n500 {RMC_3}\n1500 {RMC_4}\n");
+    for n in 2..12 {
+        recording.push_str(&format!("{} $GPGSV,3,3,09*00\n", 500 + n * 1000));
+    }
+    assert_eq!(
+        stale_comment("gsv-only", &recording).await,
+        " · sentences still arriving"
+    );
+}

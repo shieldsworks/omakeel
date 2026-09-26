@@ -41,6 +41,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const RECORD_QUEUE: usize = 4096;
 /// How soon after a line is written the recording is synced to disk.
 const SYNC_EVERY: Duration = Duration::from_secs(10);
+/// A GPS line this long after the GPS's last position is the receiver
+/// still talking, not the tail of the burst that carried the position.
+const STILL_TALKING: Duration = Duration::from_secs(2);
 /// How long exiting waits for the recording to reach the disk. A stalled
 /// disk mustn't hang shutdown.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
@@ -81,7 +84,7 @@ pub async fn run(config: Config) -> io::Result<()> {
             state: SourceState::new(spec.to_string()),
             heard: None,
             connected: None,
-            positions: false,
+            last_position: None,
             ais: Assembler::default(),
         })
         .collect();
@@ -123,7 +126,7 @@ pub async fn run(config: Config) -> io::Result<()> {
                         Ok(sentence) => {
                             tracked.state.sentences += 1;
                             if let Some(position) = nmea::position(&sentence) {
-                                tracked.positions = true;
+                                tracked.last_position = Some(now);
                                 nav.update(position, now);
                             }
                             for report in tracked.ais.feed(&sentence) {
@@ -185,11 +188,15 @@ pub async fn run(config: Config) -> io::Result<()> {
         // Whether a GPS is still sending anything, for a stale fix: the
         // receiver or its link gone silent, or talking without a position.
         // AIS arriving says nothing about the GPS, so only sources that
-        // have given a position count.
-        let arriving = sources.iter().any(|t| {
-            t.positions
-                && t.heard
-                    .is_some_and(|h| now.saturating_duration_since(h) < STALE_AFTER)
+        // have given a position count, and only lines well after their last
+        // position: a receiver's burst trails GSV, GSA or VTG up to a second
+        // behind the fix, and that tail isn't the receiver still talking.
+        let arriving = sources.iter().any(|t| match (t.last_position, t.heard) {
+            (Some(position), Some(heard)) => {
+                heard.saturating_duration_since(position) >= STILL_TALKING
+                    && now.saturating_duration_since(heard) < STALE_AFTER
+            }
+            _ => false,
         });
         let fix = nav.state(now);
         // What changed, in the recording and on stderr, so a dropout can be
@@ -269,8 +276,8 @@ struct Tracked {
     /// When a serial or TCP link was last reached, until its first line or
     /// its next error.
     connected: Option<Instant>,
-    /// Has sent a position sentence: a GPS, not only AIS.
-    positions: bool,
+    /// When it last sent a position sentence. None for AIS alone.
+    last_position: Option<Instant>,
     /// Multi-sentence AIS messages are joined per source.
     ais: Assembler,
 }

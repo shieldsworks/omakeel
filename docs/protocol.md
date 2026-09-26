@@ -190,9 +190,11 @@ never overwrites an existing file.
   - `fix STATUS` each time the fix's `status` changes, with the satellites
     and HDOP when the hub has them. Anything but `ok` gives the last ones
     heard, which is what the receiver could see as the fix went. A `stale`
-    fix ends with `· no sentences` when no source that has ever given a
-    position has sent a line for 5 seconds, and `· sentences still
-    arriving` when one has (AIS doesn't count): a short
+    fix ends with `· sentences still arriving` when a source that has
+    given a position has sent a line in the last 5 seconds and at least 2
+    seconds after its last position, and `· no sentences` otherwise. AIS
+    doesn't count, and neither does the GSV, GSA or VTG that trails a
+    receiver's position by up to a second: a short
     dropout is over before a quiet source would be written, and this says
     which it was.
   - The same lines go to stderr with the local time. stderr is written on
