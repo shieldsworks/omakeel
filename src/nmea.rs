@@ -1,6 +1,6 @@
 //! NMEA 0183: sentence framing and checksums, and the two position
-//! sentences omakeel reads, RMC and GGA. Everything else, AIS included, is
-//! checked and counted but not decoded yet.
+//! sentences omakeel reads, RMC and GGA. AIS sentences pass the checksum
+//! here and are decoded in `ais`. Other sentences are checked and counted.
 
 /// A sentence whose checksum matched, split into its talker (`GP`), kind
 /// (`RMC`) and the comma-separated fields after the address.
