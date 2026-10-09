@@ -1,5 +1,4 @@
-# `mise install` gets the toolchain; `mise tasks` lists the jobs and each
-# runs as `mise <job>`.
+# `watch` is mise's file watcher, so the terminal client is `mise follow`.
 
 [tools]
 rust = { version = "1.98", profile = "minimal", components = "rustfmt,clippy" }
@@ -27,8 +26,8 @@ run = "cargo fmt"
 description = "Run the hub on the sample sail out of Berkeley Marina"
 run = "cargo run --locked -- run --source replay:tests/fixtures/berkeley-marina.nmea"
 
-[tasks.watch]
-description = "Print the running hub's state as it changes"
+[tasks.follow]
+description = "Print the running hub's state as it changes (omakeel watch)"
 run = "cargo run --locked -- watch"
 
 [tasks.sample]

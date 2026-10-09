@@ -54,7 +54,7 @@ terminal:
 
 ```sh
 mise replay
-mise watch
+mise follow
 ```
 
 ```
@@ -64,6 +64,8 @@ ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | replay:tests
 AIS    3 vessels  · nearest SEA LARK 0.83 nm 301°T, CPA 0.83 nm in 0.0 min  DANGER BAY RUNNER
 ok      37°51.897′N  122°19.215′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (36 ok, 0 bad)
 ```
+
+`mise follow` runs `omakeel watch`. `mise watch` is mise's file watcher.
 
 The sample's vessels are invented. BAY RUNNER is a ferry set to cross 0.2 nm
 from the boat, to show the collision alarm.
@@ -131,9 +133,10 @@ omakeel run --source tcp:10.0.2.2:10110
 ## Develop
 
 ```sh
-mise lint     # rustfmt and clippy
-mise test     # unit tests and the socket test, on a paused clock
-mise sample   # regenerate tests/fixtures/berkeley-marina.nmea
+scripts/verify.sh   # lint, tests, and a checkout left as it was found
+mise lint           # rustfmt, clippy, and the comment ban
+mise test           # unit tests and the socket tests, on a paused clock
+mise sample         # regenerate tests/fixtures/berkeley-marina.nmea
 ```
 
 ## License
