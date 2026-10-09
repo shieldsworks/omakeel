@@ -37,9 +37,15 @@ jobs:
             ~/.cargo/git
             target
           key: rust-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'mise.toml') }}
-      - name: Lint
-        run: mise lint
-      - name: Test
-        run: mise test
+      - name: Verify
+        run: scripts/verify.sh
+      - name: qmllint
+        if: matrix.arch == 'x86_64' && hashFiles('ui/*.qml') != ''
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src archlinux:base bash -c '
+            pacman -Sy --noconfirm --needed qt6-declarative >/dev/null &&
+            /usr/lib/qt6/bin/qmllint --max-warnings 0 --import disable \
+              --unresolved-type disable --missing-property disable \
+              --unqualified disable ui/*.qml'
       - name: Release build
         run: cargo build --release --locked
