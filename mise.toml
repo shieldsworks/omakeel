@@ -12,10 +12,11 @@ description = "Unit tests and the socket test"
 run = "cargo test --locked"
 
 [tasks.lint]
-description = "rustfmt check and clippy with warnings denied"
+description = "rustfmt check, clippy with warnings denied, and the comment ban"
 run = [
   "cargo fmt --check",
   "cargo clippy --locked --all-targets -- -D warnings",
+  "scripts/check-comments.sh",
 ]
 
 [tasks.format]
