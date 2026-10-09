@@ -308,6 +308,10 @@ impl Tracked {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "serde_json writes a non-finite f64 as null and returns an error only for a non-finite map key, and Message has no map"
+)]
 fn encode(message: &Message) -> Arc<str> {
     let mut line = serde_json::to_string(message).expect("messages serialize");
     line.push('\n');

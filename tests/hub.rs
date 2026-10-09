@@ -1,6 +1,12 @@
 //! The hub end to end: a recorded sail in, an app's view out, on a paused
 //! clock so the minute-long sail replays in no real time.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic is how an integration test fails"
+)]
+
 use omakeel::{
     hub::{self, Config},
     source::Spec,
@@ -17,6 +23,43 @@ const SAIL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/berkeley-marina.nmea"
 );
+
+const PROTOCOL: &str = include_str!("../docs/protocol.md");
+
+fn examples() -> Vec<Value> {
+    PROTOCOL
+        .split("```json\n")
+        .skip(1)
+        .map(|rest| serde_json::from_str(rest.split_once("```").unwrap().0).unwrap())
+        .collect()
+}
+
+fn documented(kind: &str) -> Value {
+    examples()
+        .into_iter()
+        .find(|example| example["type"] == kind)
+        .unwrap_or_else(|| panic!("docs/protocol.md has no {kind} example"))
+}
+
+fn keys(object: &Value) -> Vec<&str> {
+    let mut names: Vec<&str> = object
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+fn has_null(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.iter().any(has_null),
+        Value::Object(fields) => fields.values().any(has_null),
+        _ => false,
+    }
+}
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("omakeel-{name}-{}", std::process::id()));
@@ -46,7 +89,12 @@ async fn connect(socket: &Path) -> Lines<BufReader<UnixStream>> {
 
 async fn next(lines: &mut Lines<BufReader<UnixStream>>) -> Value {
     let line = lines.next_line().await.unwrap().expect("hub closed");
-    serde_json::from_str(&line).unwrap()
+    let message: Value = serde_json::from_str(&line).unwrap();
+    assert!(
+        !has_null(&message),
+        "docs/protocol.md leaves out keys that do not apply, and never sends null: {line}"
+    );
+    message
 }
 
 fn replay(socket: &Path, record: Option<PathBuf>) -> Config {
@@ -70,6 +118,19 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
         (hello["type"].as_str(), hello["v"].as_u64()),
         (Some("hello"), Some(1))
     );
+    assert_eq!(
+        examples()
+            .iter()
+            .map(|example| example["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["hello", "state", "targets"],
+        "docs/protocol.md's examples are hello, state, and targets"
+    );
+    assert_eq!(
+        keys(&hello),
+        keys(&documented("hello")),
+        "docs/protocol.md's hello example"
+    );
 
     // RMC arrives first each second and GGA 40 ms later, so the first `ok`
     // has speed but not yet satellites; wait for a state with both.
@@ -84,6 +145,22 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
     assert!((fix["lon"].as_f64().unwrap() + 122.32).abs() < 0.001);
     assert_eq!(fix["sogKn"], 5.0);
     assert_eq!(fix["satellites"], 9);
+    let doc_state = documented("state");
+    assert_eq!(
+        keys(&ok),
+        keys(&doc_state),
+        "docs/protocol.md's state example"
+    );
+    assert_eq!(
+        keys(fix),
+        keys(&doc_state["fix"]),
+        "docs/protocol.md's fix example"
+    );
+    assert_eq!(
+        keys(&ok["sources"][0]),
+        keys(&doc_state["sources"][0]),
+        "docs/protocol.md's sources example"
+    );
 
     // The sample's ferry is set to pass 0.2 nm from the boat in about five
     // minutes: a danger once both have positions, speeds and courses. The
@@ -108,7 +185,18 @@ async fn an_app_follows_the_sail_until_the_fix_goes_stale() {
             .unwrap_or_else(|| panic!("{mmsi} missing"))
             .clone()
     };
+    let doc_targets = documented("targets");
+    assert_eq!(
+        keys(&traffic),
+        keys(&doc_targets),
+        "docs/protocol.md's targets example"
+    );
     let ferry = vessel(366999101);
+    assert_eq!(
+        keys(&ferry),
+        keys(&doc_targets["targets"][0]),
+        "docs/protocol.md's target example is the sample's BAY RUNNER"
+    );
     assert_eq!(
         ferry["name"], "BAY RUNNER",
         "joined from a two-sentence type 5"

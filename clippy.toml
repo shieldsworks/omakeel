@@ -1,0 +1,6 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+
+# scripts/verify.sh fails when this string differs from Cargo.toml rust-version.
+msrv = "1.89"
