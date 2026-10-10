@@ -338,18 +338,17 @@ async fn recording_never_overwrites_a_sail() {
     );
 }
 
-/// A bridge that is up with nothing behind it: the Mac's socat accepting,
-/// the GPS unplugged. The app sees the source quiet, and the recording says
-/// the link was reached, not that it was down. Real time: about 6 s.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_link_up_with_nothing_behind_it_goes_quiet() {
     let dir = scratch("silent-link");
     let socket = dir.join("keel.sock");
     let record = dir.join("recorded.nmea");
     let bridge = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = bridge.local_addr().unwrap().to_string();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
     let held = tokio::spawn(async move {
         let (stream, _) = bridge.accept().await.unwrap();
+        let _ = accepted_tx.send(());
         sleep(Duration::from_secs(60)).await;
         drop(stream);
     });
@@ -361,8 +360,24 @@ async fn a_link_up_with_nothing_behind_it_goes_quiet() {
         record: Some(record.clone()),
     };
     let hub = tokio::spawn(hub::run(config));
+    let opened = tokio::time::Instant::now();
+    let mut turns = 0;
+    while accepted_rx.try_recv().is_err() {
+        turns += 1;
+        assert!(turns < 1000, "the bridge did not accept");
+        tokio::task::yield_now().await;
+    }
+    // The source sends Connected when the bridge accepts. Sleep so the hub
+    // records that instant before the clock jumps.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(
+        opened.elapsed() < Duration::from_secs(1),
+        "the link was up at {:?}, before the jump",
+        opened.elapsed()
+    );
+    tokio::time::advance(Duration::from_secs(6)).await;
     let mut lines = connect(&socket).await;
-    let quiet = tokio::time::timeout(Duration::from_secs(10), async {
+    let quiet = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let state = next(&mut lines).await;
             if state["type"] == "state" && state["sources"][0]["status"] == "quiet" {
