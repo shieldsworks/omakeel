@@ -28,7 +28,7 @@ const RETRY: Duration = Duration::from_secs(2);
 /// NMEA 0183's standard rate, and the GlobalSat BU-353-S4's.
 const DEFAULT_BAUD: u32 = 4800;
 
-pub enum Event {
+pub(crate) enum Event {
     Line {
         source: usize,
         line: String,
@@ -108,7 +108,7 @@ impl fmt::Display for Spec {
 /// Starts reading `spec`, sending each line and status change as `source`.
 /// TCP and replay stop as soon as the hub is gone. A serial port's thread
 /// stops at its next line, or when the process exits.
-pub fn spawn(source: usize, spec: Spec, events: mpsc::Sender<Event>) {
+pub(crate) fn spawn(source: usize, spec: Spec, events: mpsc::Sender<Event>) {
     match spec {
         Spec::Serial { path, baud } => {
             thread::spawn(move || serial(source, &path, baud, &events));

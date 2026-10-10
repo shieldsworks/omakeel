@@ -14,7 +14,7 @@
 //! that is only briefly silent, like AIS on an empty bay, isn't news either.
 
 use crate::fix::STALE_AFTER;
-use crate::protocol::{FixState, FixStatus, SourceStatus};
+use crate::protocol::{Fix, FixStatus, SourceStatus};
 use std::{
     io::{self, Write},
     sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
@@ -148,7 +148,7 @@ impl Journal {
                     return None;
                 }
                 seen.status = Some(status);
-                Some(format!("source {name} {}", word(status)))
+                Some(format!("source {name} {}", status.as_str()))
             }
         }
     }
@@ -163,24 +163,21 @@ impl Journal {
     /// sentences were still arriving, since a quiet link is only written
     /// after `QUIET_HOLD` and a short dropout would otherwise say nothing
     /// about which it was.
-    pub fn fix(&mut self, fix: &FixState, arriving: bool) -> Option<String> {
-        if self.fix == Some(fix.status) {
+    pub fn fix(&mut self, fix: &Fix, arriving: bool) -> Option<String> {
+        let status = fix.status();
+        if self.fix == Some(status) {
             return None;
         }
-        self.fix = Some(fix.status);
-        let mut line = format!("fix {}", fix_word(fix.status));
-        let last = if fix.status == FixStatus::Ok {
-            ""
-        } else {
-            "last "
-        };
-        match (fix.satellites, fix.hdop) {
+        self.fix = Some(status);
+        let mut line = format!("fix {}", status.as_str());
+        let last = if status == FixStatus::Ok { "" } else { "last " };
+        match (fix.satellites(), fix.hdop()) {
             (Some(n), Some(h)) => line.push_str(&format!(" · {last}{n} satellites, hdop {h}")),
             (Some(n), None) => line.push_str(&format!(" · {last}{n} satellites")),
             (None, Some(h)) => line.push_str(&format!(" · {last}hdop {h}")),
             (None, None) => {}
         }
-        if fix.status == FixStatus::Stale {
+        if status == FixStatus::Stale {
             line.push_str(if arriving {
                 " · sentences still arriving"
             } else {
@@ -205,25 +202,6 @@ impl Journal {
 
 fn one_line(text: &str) -> String {
     text.replace(|c: char| c.is_control(), " ")
-}
-
-fn word(status: SourceStatus) -> &'static str {
-    match status {
-        SourceStatus::Connecting => "connecting",
-        SourceStatus::Ok => "ok",
-        SourceStatus::Quiet => "quiet",
-        SourceStatus::Error => "error",
-        SourceStatus::Ended => "ended",
-    }
-}
-
-fn fix_word(status: FixStatus) -> &'static str {
-    match status {
-        FixStatus::None => "none",
-        FixStatus::Nofix => "nofix",
-        FixStatus::Ok => "ok",
-        FixStatus::Stale => "stale",
-    }
 }
 
 /// `2026-09-21 13:50:12`, this machine's local time, for stderr. The
@@ -535,11 +513,22 @@ mod tests {
         );
     }
 
-    fn state(status: FixStatus, satellites: Option<u8>, hdop: Option<f64>) -> FixState {
-        FixState {
+    fn state(status: FixStatus, satellites: Option<u8>, hdop: Option<f64>) -> Fix {
+        let sky = || crate::protocol::Place {
+            lat: 0.0,
+            lon: 0.0,
+            sog_kn: None,
+            cog_deg: None,
+            utc: None,
             satellites,
             hdop,
-            ..FixState::without_position(status)
+            age_seconds: 0,
+        };
+        match status {
+            FixStatus::None => Fix::none(),
+            FixStatus::Nofix => Fix::nofix(None),
+            FixStatus::Ok => Fix::ok(sky()),
+            FixStatus::Stale => Fix::stale(sky()),
         }
     }
 

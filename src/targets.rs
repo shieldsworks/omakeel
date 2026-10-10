@@ -135,10 +135,13 @@ impl Vessel {
             name: self.name.clone(),
             callsign: self.callsign.clone(),
             ship_type: self.ship_type,
-            kind: self.ship_type.and_then(kind),
-            class: self.class.map(|c| match c {
-                Class::A => "A",
-                Class::B => "B",
+            kind: self.ship_type.and_then(kind).map(str::to_owned),
+            class: self.class.map(|c| {
+                match c {
+                    Class::A => "A",
+                    Class::B => "B",
+                }
+                .to_owned()
             }),
             status: None,
             lat: None,
@@ -164,7 +167,7 @@ impl Vessel {
             return target;
         };
         let age = now.saturating_duration_since(*at);
-        target.status = p.status.and_then(status);
+        target.status = p.status.and_then(status).map(str::to_owned);
         target.lat = Some(round(p.lat, 7));
         target.lon = Some(round(p.lon, 7));
         target.sog_kn = p.sog_kn;
@@ -332,7 +335,7 @@ mod tests {
             (Some(0.0), Some(10.0))
         );
         assert!(target.danger);
-        assert_eq!(target.status, Some("under way using engine"));
+        assert_eq!(target.status.as_deref(), Some("under way using engine"));
     }
 
     #[test]
@@ -430,7 +433,7 @@ mod tests {
         let target = &traffic.targets(t, still())[0];
         assert_eq!(target.name.as_deref(), Some("SEA LARK"));
         assert_eq!(target.callsign.as_deref(), Some("WDY9103"));
-        assert_eq!(target.kind, Some("sailing"));
+        assert_eq!(target.kind.as_deref(), Some("sailing"));
         assert_eq!(target.range_nm, None, "no position yet");
     }
 

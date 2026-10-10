@@ -5,11 +5,11 @@ use crate::ais::Assembler;
 use crate::fix::{Navigation, STALE_AFTER};
 use crate::journal::{self, Journal, Stderr};
 use crate::nmea;
-use crate::protocol::{FixStatus, Message, SourceState, SourceStatus, VERSION};
+use crate::protocol::{Message, SourceState, SourceStatus, VERSION};
 use crate::source::{self, Event, Spec};
 use crate::targets::{Own, Traffic};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Write},
     os::unix::{
@@ -57,11 +57,22 @@ pub struct Config {
 
 /// `$XDG_RUNTIME_DIR/omakeel/keel.sock`.
 pub fn default_socket() -> io::Result<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("omakeel").join("keel.sock"))
-        .ok_or_else(|| io::Error::other("XDG_RUNTIME_DIR must be set to an absolute path"))
+    socket_in(std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+}
+
+fn socket_in(runtime_dir: Option<&OsStr>) -> io::Result<PathBuf> {
+    let Some(dir) = absolute_dir(runtime_dir) else {
+        return Err(io::Error::other(
+            "XDG_RUNTIME_DIR must be set to an absolute path",
+        ));
+    };
+    Ok(dir.join("omakeel").join("keel.sock"))
+}
+
+fn absolute_dir(value: Option<&OsStr>) -> Option<&Path> {
+    let value = value.filter(|dir| !dir.is_empty())?;
+    let path = Path::new(value);
+    path.is_absolute().then_some(path)
 }
 
 /// Runs until it fails to bind or to start recording. The socket file is
@@ -99,10 +110,12 @@ pub async fn run(config: Config) -> io::Result<()> {
     let mut traffic = Traffic::default();
     let mut clients: Vec<Client> = Vec::new();
     let mut last_state: Arc<str> = Arc::from("");
-    let mut last_targets = encode(&Message::Targets {
+    let mut last_targets: Arc<str> = Message::Targets {
         v: VERSION,
-        targets: &[],
-    });
+        targets: Vec::new(),
+    }
+    .to_line()
+    .into();
     // Once a second the hub re-judges freshness, so a fix goes stale on
     // time even when nothing arrives, and sends the traffic.
     let mut tick = interval(Duration::from_secs(1));
@@ -161,7 +174,12 @@ pub async fn run(config: Config) -> io::Result<()> {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let client = Client::spawn(stream);
-                    let hello = encode(&Message::Hello { v: VERSION, keel: env!("CARGO_PKG_VERSION") });
+                    let hello: Arc<str> = Message::Hello {
+                        v: VERSION,
+                        keel: env!("CARGO_PKG_VERSION").to_owned(),
+                    }
+                    .to_line()
+                    .into();
                     if client.tx.try_send(hello).is_ok() {
                         clients.push(client);
                     }
@@ -234,31 +252,35 @@ pub async fn run(config: Config) -> io::Result<()> {
             }
         }
         let states: Vec<SourceState> = sources.iter().map(|t| t.state.clone()).collect();
-        let state = encode(&Message::State {
+        let own = if ticked {
+            fix.position().filter(|pos| pos.current).map(|pos| Own {
+                lat: pos.place.lat,
+                lon: pos.place.lon,
+                sog_kn: pos.place.sog_kn,
+                cog_deg: pos.place.cog_deg,
+            })
+        } else {
+            None
+        };
+        let state: Arc<str> = Message::State {
             v: VERSION,
-            fix: &fix,
-            sources: &states,
-        });
+            fix,
+            sources: states,
+        }
+        .to_line()
+        .into();
         let state_changed = state != last_state;
         last_state = state;
 
         let mut targets_changed = false;
         if ticked {
             traffic.expire(now);
-            // Ranges and CPAs only from a current fix.
-            let own = match (fix.status, fix.lat, fix.lon) {
-                (FixStatus::Ok, Some(lat), Some(lon)) => Some(Own {
-                    lat,
-                    lon,
-                    sog_kn: fix.sog_kn,
-                    cog_deg: fix.cog_deg,
-                }),
-                _ => None,
-            };
-            let targets = encode(&Message::Targets {
+            let targets: Arc<str> = Message::Targets {
                 v: VERSION,
-                targets: &traffic.targets(now, own),
-            });
+                targets: traffic.targets(now, own),
+            }
+            .to_line()
+            .into();
             targets_changed = targets != last_targets;
             last_targets = targets;
         }
@@ -306,16 +328,6 @@ impl Tracked {
             (h, c) => h.or(c),
         }
     }
-}
-
-#[expect(
-    clippy::expect_used,
-    reason = "serde_json writes a non-finite f64 as null and returns an error only for a non-finite map key, and Message has no map"
-)]
-fn encode(message: &Message) -> Arc<str> {
-    let mut line = serde_json::to_string(message).expect("messages serialize");
-    line.push('\n');
-    line.into()
 }
 
 /// One connected app, fed through a queue by its own writer task. Dropping
@@ -610,6 +622,33 @@ mod tests {
         assert!(r.send("4 $GPRMC".into(), false));
         assert!(r.caught_up(), "write everything as it stands again");
         assert!(!r.caught_up(), "once");
+    }
+
+    #[test]
+    fn an_unset_runtime_dir_does_not_fall_back_through_home() {
+        for dir in [
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new(".")),
+            Some(OsStr::new("run/user/1000")),
+        ] {
+            let err = match socket_in(dir) {
+                Ok(path) => panic!("{}", path.display()),
+                Err(err) => err,
+            };
+            assert_eq!(
+                err.to_string(),
+                "XDG_RUNTIME_DIR must be set to an absolute path"
+            );
+        }
+        assert_eq!(
+            socket_in(Some(OsStr::new("/run/user/1000"))).unwrap(),
+            PathBuf::from("/run/user/1000/omakeel/keel.sock")
+        );
+        assert_eq!(
+            socket_in(Some(OsStr::new("/"))).unwrap(),
+            PathBuf::from("/omakeel/keel.sock")
+        );
     }
 
     #[test]
