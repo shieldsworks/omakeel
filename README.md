@@ -18,7 +18,8 @@ sail so far.
 - Takes position, speed and course over ground, UTC, satellites and HDOP from
   RMC and GGA.
 - Serves one state to every app over a Unix socket, as newline-delimited JSON
-  ([docs/protocol.md](docs/protocol.md)).
+  ([docs/protocol.md](docs/protocol.md)). Other apps parse those lines with
+  the `omakeel-protocol` crate, which does not depend on `tokio` or `libc`.
 - Says when the fix is stale. Speed and course are never passed off as
   current once the GPS has stopped sending them.
 - Decodes AIS from a receiver like the dAISy: position reports from class A

@@ -2,6 +2,15 @@
 
 Version 1. omakeel is the server. Every Omahoy app is a client.
 
+The Rust types are the `omakeel-protocol` crate in this repository. It depends on `serde` and `serde_json`.
+
+```toml
+[dependencies]
+omakeel-protocol = { git = "https://github.com/shieldsworks/omakeel", package = "omakeel-protocol" }
+```
+
+`package` selects that crate. Cargo selects the `omakeel` package when `package` is omitted, and that package also builds `tokio` and `libc`.
+
 ## Transport
 
 - A Unix stream socket, `$XDG_RUNTIME_DIR/omakeel/keel.sock` by default

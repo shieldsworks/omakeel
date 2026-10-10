@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "protocol"]
+resolver = "3"
+
 [package]
 name = "omakeel"
 version = "0.1.0"
@@ -11,6 +15,7 @@ homepage = "https://omahoy.org"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+omakeel-protocol = { path = "protocol" }
 # termios for serial ports: raw mode and the baud rate an NMEA device expects.
 libc = "0.2"
 tokio = { version = "1.53", features = ["rt", "net", "time", "sync", "io-util", "fs", "macros", "signal"] }

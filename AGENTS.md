@@ -93,9 +93,10 @@ warnings, so turning them on fails the build until the hits are fixed.
   kludge, band-aid. If something is wrong, fix it in this change or open an
   issue. A workaround for an outside bug is written as the fact. Name what
   the outside thing does, and what this code does about it.
-- Minimal dependencies. The crates are `serde`, `serde_json`, `libc`, and
-  `tokio`. Ask before adding a crate. Range, bearing, and CPA are computed
-  in `src/targets.rs`. Do not add GDAL, geo, proj, or any map library.
+- Minimal dependencies. `omakeel-protocol` uses `serde` and `serde_json`.
+  The daemon also uses `libc` and `tokio`. Ask before adding a crate.
+  Range, bearing, and CPA are computed in `src/targets.rs`. Do not add
+  GDAL, geo, proj, or any map library.
   Serial ports use termios through `libc`. Always pass `--locked`. Change
   `Cargo.lock` only in a PR about dependencies.
 - `unsafe` stays in the three libc wrappers. `open_serial` is in
@@ -123,7 +124,7 @@ they ran and saw.
 - `src/ais.rs` decodes AIS `!AIVDM` messages, types 1, 2, 3, 5, 18, 19, and 24.
 - `src/targets.rs` holds the vessel table, range, bearing, CPA, and the danger flag.
 - `src/journal.rs` writes the recording's status comments, and stderr on its own thread.
-- `src/protocol.rs` is the wire messages that `docs/protocol.md` specifies.
+- `src/protocol.rs` is the wire messages that `docs/protocol.md` specifies. `protocol/` publishes that file as the `omakeel-protocol` crate.
 - `src/watch.rs` is `omakeel watch`, one line per change.
 - `tests/hub.rs` runs the hub end to end on the sample sail, on a paused clock.
 - `tests/fixtures/berkeley-marina.nmea` is the synthetic sample sail.

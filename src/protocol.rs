@@ -148,25 +148,25 @@ impl<'de> Deserialize<'de> for Fix {
 }
 
 impl Fix {
-    pub(crate) fn none() -> Fix {
+    pub fn none() -> Fix {
         Fix {
             inner: FixInner::None,
         }
     }
 
-    pub(crate) fn nofix(last: Option<Place>) -> Fix {
+    pub fn nofix(last: Option<Place>) -> Fix {
         Fix {
             inner: FixInner::Nofix(last),
         }
     }
 
-    pub(crate) fn ok(place: Place) -> Fix {
+    pub fn ok(place: Place) -> Fix {
         Fix {
             inner: FixInner::Ok(place),
         }
     }
 
-    pub(crate) fn stale(place: Place) -> Fix {
+    pub fn stale(place: Place) -> Fix {
         Fix {
             inner: FixInner::Stale(place),
         }
@@ -190,11 +190,11 @@ impl Fix {
         })
     }
 
-    pub(crate) fn satellites(&self) -> Option<u8> {
+    pub fn satellites(&self) -> Option<u8> {
         self.place().and_then(|place| place.satellites)
     }
 
-    pub(crate) fn hdop(&self) -> Option<f64> {
+    pub fn hdop(&self) -> Option<f64> {
         self.place().and_then(|place| place.hdop)
     }
 
