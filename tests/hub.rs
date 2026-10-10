@@ -400,8 +400,6 @@ async fn a_link_up_with_nothing_behind_it_goes_quiet() {
     );
 }
 
-/// Reached, sent one sentence, then silent for two hours. The quiet line is
-/// that measured silence. It is not five seconds after the accept.
 #[tokio::test(start_paused = true)]
 async fn a_link_that_spoke_and_later_went_quiet_keeps_the_measured_silence() {
     let dir = scratch("spoke-then-quiet");
@@ -423,8 +421,7 @@ async fn a_link_that_spoke_and_later_went_quiet_keeps_the_measured_silence() {
     };
     let hub = tokio::spawn(hub::run(config));
     let mut peer = stream_rx.await.unwrap();
-    // Connected is recorded, then the sentence, both before the long jump.
-    tokio::time::sleep(Duration::from_millis(1)).await;
+    let sent = tokio::time::Instant::now();
     peer.write_all(format!("{RMC_3}\r\n").as_bytes())
         .await
         .unwrap();
@@ -440,8 +437,7 @@ async fn a_link_that_spoke_and_later_went_quiet_keeps_the_measured_silence() {
         tokio::task::yield_now().await;
     };
     assert_eq!(spoke["sources"][0]["sentences"], 1);
-    let silence = Duration::from_secs(2 * 60 * 60);
-    tokio::time::advance(silence).await;
+    tokio::time::advance(Duration::from_secs(2 * 60 * 60)).await;
     turns = 0;
     let quiet = loop {
         turns += 1;
@@ -452,6 +448,7 @@ async fn a_link_that_spoke_and_later_went_quiet_keeps_the_measured_silence() {
         }
         tokio::task::yield_now().await;
     };
+    let measured = sent.elapsed().as_secs();
     assert!(quiet["sources"][0]["message"].is_null());
     hub.abort();
     let _ = hub.await;
@@ -466,16 +463,11 @@ async fn a_link_that_spoke_and_later_went_quiet_keeps_the_measured_silence() {
         .rsplit_once("nothing for ")
         .and_then(|(_, rest)| rest.trim_end_matches(" s").parse().ok())
         .unwrap_or_else(|| panic!("quiet line has no duration: {quiet_line}"));
-    // The paused clock also services the one-second tick while the test
-    // waits to see the sentence, so the poll can be a second past the jump.
-    assert!(
-        (silence.as_secs()..silence.as_secs() + 2).contains(&seconds),
-        "silence since the sentence should be the two-hour jump, got {seconds} s: {text}"
-    );
     assert!(
         !text.contains("nothing heard"),
         "a link that already spoke is not the reached-and-silent line: {text}"
     );
+    assert_eq!(seconds, measured, "{text}");
 }
 
 /// The comment on a stale fix: whether the GPS was still talking.
