@@ -65,8 +65,13 @@ file gets a blanket allow.
 
 ## The gates are not yours to move
 
-These files change only in a PR whose whole purpose is changing them, and a
-human reviews that PR.
+These files change only in a PR whose whole purpose is changing them. Such a
+PR merges only after review by someone other than its author. The reviewer
+is either Casey or Casey's delegated reviewer Dev. Dev's review means all
+three. An independent agent verifies the PR head on a clean checkout. It
+runs the repo's verify gate and drives the changed behavior. An adversarial
+review challenges the change. CI is green on the exact head SHA merged. The
+author agent never approves or merges its own PR.
 
 - `[lints]` in `Cargo.toml` and `clippy.toml`
 - `.github/workflows/`, `scripts/verify.sh`, `scripts/check-comments.sh`
