@@ -28,4 +28,12 @@ mod tests {
             }))
         );
     }
+
+    #[test]
+    fn the_daemon_and_the_client_crate_are_one_type() {
+        assert_eq!(
+            std::any::TypeId::of::<crate::protocol::Message>(),
+            std::any::TypeId::of::<omakeel_protocol::Message>()
+        );
+    }
 }
