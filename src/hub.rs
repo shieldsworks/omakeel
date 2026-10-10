@@ -237,7 +237,14 @@ pub async fn run(config: Config) -> io::Result<()> {
             .filter_map(|(i, t)| {
                 let silent = t.last_sign().map(|h| now.saturating_duration_since(h));
                 let message = t.state.message.as_deref();
-                journal.source(i, &t.state.name, t.state.status, message, silent, now)
+                journal.source(
+                    i,
+                    &t.state.name,
+                    t.state.status,
+                    message,
+                    silent,
+                    recorded_at(t.state.status, t.connected, now),
+                )
             })
             .collect();
         news.extend(journal.fix(&fix, arriving));
@@ -318,6 +325,13 @@ fn unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis())
+}
+
+fn recorded_at(status: SourceStatus, reached: Option<Instant>, noticed: Instant) -> Instant {
+    match (status, reached) {
+        (SourceStatus::Quiet, Some(at)) => at + STALE_AFTER,
+        _ => noticed,
+    }
 }
 
 impl Tracked {
@@ -649,6 +663,22 @@ mod tests {
             socket_in(Some(OsStr::new("/"))).unwrap(),
             PathBuf::from("/omakeel/keel.sock")
         );
+    }
+
+    #[test]
+    fn a_late_poll_is_recorded_at_the_quiet_threshold() {
+        let reached = Instant::now();
+        let noticed = reached + Duration::from_secs(6);
+        assert_eq!(
+            recorded_at(SourceStatus::Quiet, Some(reached), noticed)
+                .saturating_duration_since(reached),
+            STALE_AFTER
+        );
+        assert_eq!(
+            recorded_at(SourceStatus::Connecting, Some(reached), noticed),
+            noticed
+        );
+        assert_eq!(recorded_at(SourceStatus::Quiet, None, noticed), noticed);
     }
 
     #[test]
