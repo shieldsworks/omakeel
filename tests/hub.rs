@@ -14,7 +14,7 @@ use omakeel::{
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader, Lines},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     net::UnixStream,
     time::{Duration, sleep},
 };
@@ -397,6 +397,84 @@ async fn a_link_up_with_nothing_behind_it_goes_quiet() {
             "source tcp:{address} connected · nothing heard for 5 s"
         )),
         "{text}"
+    );
+}
+
+/// Reached, sent one sentence, then silent for two hours. The quiet line is
+/// that measured silence. It is not five seconds after the accept.
+#[tokio::test(start_paused = true)]
+async fn a_link_that_spoke_and_later_went_quiet_keeps_the_measured_silence() {
+    let dir = scratch("spoke-then-quiet");
+    let socket = dir.join("keel.sock");
+    let record = dir.join("recorded.nmea");
+    let bridge = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = bridge.local_addr().unwrap().to_string();
+    let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+    let bridge_task = tokio::spawn(async move {
+        let (stream, _) = bridge.accept().await.unwrap();
+        let _ = stream_tx.send(stream);
+    });
+    let config = Config {
+        sources: vec![Spec::Tcp {
+            address: address.clone(),
+        }],
+        socket: socket.clone(),
+        record: Some(record.clone()),
+    };
+    let hub = tokio::spawn(hub::run(config));
+    let mut peer = stream_rx.await.unwrap();
+    // Connected is recorded, then the sentence, both before the long jump.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    peer.write_all(format!("{RMC_3}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut lines = connect(&socket).await;
+    let mut turns = 0;
+    let spoke = loop {
+        turns += 1;
+        assert!(turns < 1000, "the sentence did not land");
+        let state = next(&mut lines).await;
+        if state["type"] == "state" && state["sources"][0]["status"] == "ok" {
+            break state;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(spoke["sources"][0]["sentences"], 1);
+    let silence = Duration::from_secs(2 * 60 * 60);
+    tokio::time::advance(silence).await;
+    turns = 0;
+    let quiet = loop {
+        turns += 1;
+        assert!(turns < 1000, "the source did not go quiet");
+        let state = next(&mut lines).await;
+        if state["type"] == "state" && state["sources"][0]["status"] == "quiet" {
+            break state;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert!(quiet["sources"][0]["message"].is_null());
+    hub.abort();
+    let _ = hub.await;
+    bridge_task.abort();
+    drop(peer);
+    let text = std::fs::read_to_string(&record).unwrap();
+    let quiet_line = text
+        .lines()
+        .find(|line| line.contains("quiet · nothing for "))
+        .unwrap_or_else(|| panic!("no measured quiet line: {text}"));
+    let seconds: u64 = quiet_line
+        .rsplit_once("nothing for ")
+        .and_then(|(_, rest)| rest.trim_end_matches(" s").parse().ok())
+        .unwrap_or_else(|| panic!("quiet line has no duration: {quiet_line}"));
+    // The paused clock also services the one-second tick while the test
+    // waits to see the sentence, so the poll can be a second past the jump.
+    assert!(
+        (silence.as_secs()..silence.as_secs() + 2).contains(&seconds),
+        "silence since the sentence should be the two-hour jump, got {seconds} s: {text}"
+    );
+    assert!(
+        !text.contains("nothing heard"),
+        "a link that already spoke is not the reached-and-silent line: {text}"
     );
 }
 
