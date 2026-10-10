@@ -186,14 +186,15 @@ never overwrites an existing file.
     `quiet · nothing for N s`, and the `ok` after it only if it was
     written. An AIS receiver on an empty bay is quiet between vessels all
     day, and that isn't news.
-  - `connected · nothing heard for N s` is a serial or TCP source that was
+  - `connected · nothing heard for 5 s` is a serial or TCP source that was
     reached and went `quiet` without sending a line: the link is up and
-    whatever is behind it isn't talking. It is written as soon as the
-    source goes quiet, not held like other quiet. A link that is reached
-    and drops at once, as socat does with no device behind it, never goes
-    quiet and isn't written as connected. A peer that keeps accepting,
-    sitting silent and hanging up is written once, with its error, until
-    the source sends a line.
+    whatever is behind it isn't talking. The five seconds are the quiet
+    threshold. A poll that notices later still writes 5. It is written as
+    soon as the source goes quiet, not held like other quiet. A link that
+    is reached and drops at once, as socat does with no device behind it,
+    never goes quiet and isn't written as connected. A peer that keeps
+    accepting, sitting silent and hanging up is written once, with its
+    error, until the source sends a line.
   - Errors already written stay remembered until the source sends a line,
     so a link failing the same way between reconnects says it once.
   - `fix STATUS` each time the fix's `status` changes, with the satellites
