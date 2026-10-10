@@ -1,7 +1,7 @@
 //! The boat's fix as omakeel knows it, and how fresh it is.
 
 use crate::nmea::{Kind, Position};
-use crate::protocol::{FixState, FixStatus};
+use crate::protocol::{Fix, Place};
 use tokio::time::{Duration, Instant};
 
 /// A fix older than this is stale: still shown, never passed off as current.
@@ -11,14 +11,14 @@ pub const STALE_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct Navigation {
-    fix: Option<Fix>,
+    stored: Option<Stored>,
     /// When a position sentence of any kind last arrived.
     heard: Option<Instant>,
     /// The receiver is reporting no fix; cleared by the next good one.
     lost: bool,
 }
 
-struct Fix {
+struct Stored {
     lat: f64,
     lon: f64,
     /// When the newest position arrived, from either sentence.
@@ -51,7 +51,7 @@ impl Navigation {
             return;
         };
         self.lost = false;
-        let fix = self.fix.get_or_insert(Fix {
+        let fix = self.stored.get_or_insert(Stored {
             lat,
             lon,
             at,
@@ -80,39 +80,38 @@ impl Navigation {
         }
     }
 
-    pub fn state(&self, now: Instant) -> FixState {
+    pub fn state(&self, now: Instant) -> Fix {
         let recent = |t: Instant| now.saturating_duration_since(t) < STALE_AFTER;
         let talking = self.heard.is_some_and(recent);
-        let Some(fix) = &self.fix else {
-            return FixState::without_position(if talking {
-                FixStatus::Nofix
+        let Some(fix) = &self.stored else {
+            return if talking {
+                Fix::nofix(None)
             } else {
-                FixStatus::None
-            });
+                Fix::none()
+            };
         };
         let age = now.saturating_duration_since(fix.at);
-        let status = if self.lost && talking {
-            FixStatus::Nofix
-        } else if age >= STALE_AFTER {
-            FixStatus::Stale
-        } else {
-            FixStatus::Ok
-        };
         // A GPS sending only GGA mustn't carry an old RMC's speed along with
         // every fresh position, and the other way round.
-        let current = |t: Instant| fix.at.saturating_duration_since(t) < STALE_AFTER;
-        let rmc = fix.rmc.as_ref().filter(|r| current(r.at));
-        let gga = fix.gga.as_ref().filter(|g| current(g.at));
-        FixState {
-            status,
-            lat: Some(round7(fix.lat)),
-            lon: Some(round7(fix.lon)),
+        let fresh = |t: Instant| fix.at.saturating_duration_since(t) < STALE_AFTER;
+        let rmc = fix.rmc.as_ref().filter(|r| fresh(r.at));
+        let gga = fix.gga.as_ref().filter(|g| fresh(g.at));
+        let place = Place {
+            lat: round7(fix.lat),
+            lon: round7(fix.lon),
             sog_kn: rmc.and_then(|r| r.sog_kn),
             cog_deg: rmc.and_then(|r| r.cog_deg),
             utc: rmc.and_then(|r| r.utc.clone()),
             satellites: gga.and_then(|g| g.satellites),
             hdop: gga.and_then(|g| g.hdop),
-            age_seconds: Some(age.as_secs()),
+            age_seconds: age.as_secs(),
+        };
+        if self.lost && talking {
+            Fix::nofix(Some(place))
+        } else if age >= STALE_AFTER {
+            Fix::stale(place)
+        } else {
+            Fix::ok(place)
         }
     }
 }
@@ -125,6 +124,7 @@ fn round7(degrees: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::FixStatus;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
@@ -161,7 +161,8 @@ mod tests {
     #[test]
     fn nothing_heard_is_none() {
         let state = Navigation::default().state(Instant::now());
-        assert_eq!(state, FixState::without_position(FixStatus::None));
+        assert_eq!(state.status(), FixStatus::None);
+        assert_eq!(state.position(), None);
     }
 
     #[test]
@@ -170,18 +171,23 @@ mod tests {
         let mut nav = Navigation::default();
         nav.update(rmc(true, Some(5.0)), t);
         let state = nav.state(t + secs(4));
-        assert_eq!(state.status, FixStatus::Ok);
-        assert_eq!((state.lat, state.lon), (Some(37.865), Some(-122.32)));
-        assert_eq!(state.age_seconds, Some(4));
+        assert_eq!(state.status(), FixStatus::Ok);
+        let pos = state.position().expect("a fresh fix has a place");
+        assert!(pos.current);
+        assert_eq!((pos.place.lat, pos.place.lon), (37.865, -122.32));
+        assert_eq!(pos.place.age_seconds, 4);
         let state = nav.state(t + STALE_AFTER);
-        assert_eq!(state.status, FixStatus::Stale);
+        assert_eq!(state.status(), FixStatus::Stale);
+        let pos = state
+            .position()
+            .expect("a stale fix still shows where it was");
+        assert!(!pos.current);
         assert_eq!(
-            state.lat,
-            Some(37.865),
+            pos.place.lat, 37.865,
             "a stale fix still shows where it was"
         );
         assert_eq!(
-            state.sog_kn,
+            pos.place.sog_kn,
             Some(5.0),
             "and its speed, marked stale with it"
         );
@@ -192,8 +198,9 @@ mod tests {
         let t = Instant::now();
         let mut nav = Navigation::default();
         nav.update(rmc(false, None), t);
-        assert_eq!(nav.state(t).status, FixStatus::Nofix);
-        assert_eq!(nav.state(t + STALE_AFTER).status, FixStatus::None);
+        assert_eq!(nav.state(t).status(), FixStatus::Nofix);
+        assert_eq!(nav.state(t).position(), None);
+        assert_eq!(nav.state(t + STALE_AFTER).status(), FixStatus::None);
     }
 
     #[test]
@@ -203,11 +210,15 @@ mod tests {
         nav.update(rmc(true, Some(5.0)), t);
         nav.update(rmc(false, None), t + secs(1));
         let state = nav.state(t + secs(2));
-        assert_eq!(state.status, FixStatus::Nofix);
-        assert_eq!(state.lat, Some(37.865));
-        assert_eq!(state.age_seconds, Some(2));
+        assert_eq!(state.status(), FixStatus::Nofix);
+        let pos = state
+            .position()
+            .expect("lost and talking keeps the last place");
+        assert!(!pos.current);
+        assert_eq!(pos.place.lat, 37.865);
+        assert_eq!(pos.place.age_seconds, 2);
         nav.update(rmc(true, Some(5.0)), t + secs(3));
-        assert_eq!(nav.state(t + secs(3)).status, FixStatus::Ok);
+        assert_eq!(nav.state(t + secs(3)).status(), FixStatus::Ok);
     }
 
     #[test]
@@ -217,8 +228,11 @@ mod tests {
         nav.update(rmc(true, Some(5.0)), t);
         nav.update(rmc(false, None), t + secs(1));
         let state = nav.state(t + secs(1) + STALE_AFTER);
-        assert_eq!(state.status, FixStatus::Stale);
-        assert_eq!(state.lat, Some(37.865));
+        assert_eq!(state.status(), FixStatus::Stale);
+        assert_eq!(
+            state.position().expect("stale still has a place").place.lat,
+            37.865
+        );
     }
 
     #[test]
@@ -228,11 +242,13 @@ mod tests {
         nav.update(rmc(true, Some(5.0)), t);
         nav.update(gga(), t);
         let state = nav.state(t);
-        assert_eq!((state.sog_kn, state.satellites), (Some(5.0), Some(9)));
+        let place = &state.position().expect("a fresh fix has a place").place;
+        assert_eq!((place.sog_kn, place.satellites), (Some(5.0), Some(9)));
         // An RMC that stops sending speed clears it rather than keeping 5.0.
         nav.update(rmc(true, None), t);
         let state = nav.state(t);
-        assert_eq!((state.sog_kn, state.satellites), (None, Some(9)));
+        let place = &state.position().expect("a fresh fix has a place").place;
+        assert_eq!((place.sog_kn, place.satellites), (None, Some(9)));
     }
 
     #[test]
@@ -244,9 +260,10 @@ mod tests {
             nav.update(gga(), t + secs(s));
         }
         let state = nav.state(t + secs(6));
-        assert_eq!(state.status, FixStatus::Ok);
-        assert_eq!(state.sog_kn, None, "5 kn from a 6 s old RMC isn't current");
-        assert_eq!(state.utc, None);
-        assert_eq!(state.satellites, Some(9));
+        assert_eq!(state.status(), FixStatus::Ok);
+        let place = &state.position().expect("a fresh fix has a place").place;
+        assert_eq!(place.sog_kn, None, "5 kn from a 6 s old RMC isn't current");
+        assert_eq!(place.utc, None);
+        assert_eq!(place.satellites, Some(9));
     }
 }
