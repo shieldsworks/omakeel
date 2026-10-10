@@ -52,9 +52,17 @@ name = "omakeel"
 version = "0.1.0"
 dependencies = [
  "libc",
- "serde",
+ "omakeel-protocol",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "omakeel-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

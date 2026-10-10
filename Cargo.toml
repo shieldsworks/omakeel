@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "protocol"]
+resolver = "3"
+
 [package]
 name = "omakeel"
 version = "0.1.0"
@@ -9,8 +13,7 @@ repository = "https://github.com/shieldsworks/omakeel"
 homepage = "https://omahoy.org"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+omakeel-protocol = { path = "protocol" }
 # termios for serial ports: raw mode and the baud rate an NMEA device expects.
 libc = "0.2"
 tokio = { version = "1.53", features = ["rt", "net", "time", "sync", "io-util", "fs", "macros", "signal"] }
@@ -18,6 +21,8 @@ tokio = { version = "1.53", features = ["rt", "net", "time", "sync", "io-util", 
 [dev-dependencies]
 # A paused clock, so the replay and staleness tests run in no real time.
 tokio = { version = "1.53", features = ["test-util"] }
+# The socket tests read JSON lines and the examples in docs/protocol.md.
+serde_json = "1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
