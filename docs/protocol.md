@@ -78,6 +78,11 @@ replace their copy rather than merging.
   them wins. There's no preferred GPS yet, so run one GPS at a time until
   there is.
 
+`from_line` still returns a version-1 `state` when a field is missing, null,
+or the wrong JSON type. A latitude outside -90..=90, or a longitude outside
+-180..=180, is not a position. The hub still sends the strict shape: known
+statuses, both coordinates or neither, integer ages, and no nulls.
+
 ### `sources`
 
 One entry per `--source`, in command-line order.
