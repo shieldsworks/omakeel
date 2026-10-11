@@ -1,8 +1,7 @@
 //! Hub-to-app messages: newline-delimited JSON, version 1.
 //! `docs/protocol.md` is the contract; change both together.
 
-use serde::de;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use std::fmt;
 
@@ -28,25 +27,25 @@ pub enum Message {
 
 impl Message {
     /// One JSON object, with or without the trailing newline the hub writes.
-    /// `Ok(None)` is a blank line or a `type` this version does not know.
-    /// Any `v` other than [`VERSION`], a missing `v`, a `null`, or a known
-    /// type with an illegal fix or target is `Err`.
+    /// `Ok(None)` is a blank line, a version-1 `type` this parser does not know,
+    /// or a version-1 `state` that omits `fix`.
+    /// A `v` other than 1 is [`ReadError::Version`]. A hello whose `keel` is
+    /// not a string, or a targets line that is not the version-1 shape, is
+    /// [`ReadError::NotJson`]. A version-1 `state` that has a `fix` key is
+    /// returned even when a field is missing, null, or the wrong JSON type.
     pub fn from_line(line: &str) -> Result<Option<Message>, ReadError> {
         let line = line.strip_suffix('\n').unwrap_or(line);
         if line.is_empty() {
             return Ok(None);
         }
         let value: Value = serde_json::from_str(line).map_err(|_| ReadError::NotJson)?;
-        if contains_null(&value) {
-            return Err(ReadError::Null);
-        }
         let Some(obj) = value.as_object() else {
             return Err(ReadError::NotJson);
         };
         require_version(obj)?;
         match obj.get("type").and_then(Value::as_str) {
             Some("hello") => hello(obj).map(Some),
-            Some("state") => state(obj).map(Some),
+            Some("state") => Ok(state(obj)),
             Some("targets") => targets(obj).map(Some),
             _ => Ok(None),
         }
@@ -70,22 +69,10 @@ impl Message {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadError {
-    /// Not JSON, or a known message whose fields are not the shape version 1 reads.
+    /// Not JSON, not an object, or a hello or targets line that is not the version-1 shape.
     NotJson,
-    /// Missing `v`, or a `v` other than 1. `found` is `None` when `v` is absent
-    /// or is not a `u32`.
-    Version { found: Option<u32> },
-    /// A `null` anywhere in the line.
-    Null,
-    /// A fix or source status outside the closed set.
-    UnknownStatus,
-    /// `ok` or `stale` without `lat`, `lon`, and `ageSeconds`, or a carried
-    /// `nofix` position missing `ageSeconds`.
-    PositionMissing,
-    /// `none` carrying `lat` or `lon`.
-    PositionForbidden,
-    /// `lat` without `lon`, or `lon` without `lat`, on a fix or a target.
-    PositionPartial,
+    /// `v` is missing or not the integer 1. `found` is that integer when `v` is a `u64` other than 1.
+    Version { found: Option<u64> },
 }
 
 impl fmt::Display for ReadError {
@@ -96,11 +83,6 @@ impl fmt::Display for ReadError {
             ReadError::Version { found: Some(found) } => {
                 write!(f, "protocol version {found}")
             }
-            ReadError::Null => f.write_str("null is not a value on this socket"),
-            ReadError::UnknownStatus => f.write_str("unknown status"),
-            ReadError::PositionMissing => f.write_str("position is missing"),
-            ReadError::PositionForbidden => f.write_str("position is not allowed"),
-            ReadError::PositionPartial => f.write_str("position is only one coordinate"),
         }
     }
 }
@@ -116,8 +98,8 @@ pub struct Fix {
 enum FixInner {
     None,
     Nofix(Option<Place>),
-    Ok(Place),
-    Stale(Place),
+    Ok(Option<Place>),
+    Stale(Option<Place>),
 }
 
 #[derive(Serialize)]
@@ -137,38 +119,31 @@ impl Serialize for Fix {
     }
 }
 
-impl<'de> Deserialize<'de> for Fix {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        if contains_null(&value) {
-            return Err(de::Error::custom(ReadError::Null));
-        }
-        fix_from_value(&value).map_err(de::Error::custom)
-    }
-}
-
 impl Fix {
     pub fn none() -> Fix {
-        Fix {
-            inner: FixInner::None,
-        }
+        Fix::with_status(FixStatus::None, None)
     }
 
     pub fn nofix(last: Option<Place>) -> Fix {
-        Fix {
-            inner: FixInner::Nofix(last),
-        }
+        Fix::with_status(FixStatus::Nofix, last)
     }
 
     pub fn ok(place: Place) -> Fix {
-        Fix {
-            inner: FixInner::Ok(place),
-        }
+        Fix::with_status(FixStatus::Ok, Some(place))
     }
 
     pub fn stale(place: Place) -> Fix {
+        Fix::with_status(FixStatus::Stale, Some(place))
+    }
+
+    fn with_status(status: FixStatus, place: Option<Place>) -> Fix {
         Fix {
-            inner: FixInner::Stale(place),
+            inner: match status {
+                FixStatus::None => FixInner::None,
+                FixStatus::Nofix => FixInner::Nofix(place),
+                FixStatus::Ok => FixInner::Ok(place),
+                FixStatus::Stale => FixInner::Stale(place),
+            },
         }
     }
 
@@ -181,12 +156,12 @@ impl Fix {
         }
     }
 
-    /// `None` for `none` and for `nofix` with nothing stored.
-    /// `current` is true only for `ok`.
+    /// `None` when the place is absent.
+    /// `current` is true only for an `ok` fix that has a place.
     pub fn position(&self) -> Option<Position> {
         Some(Position {
             place: self.place()?.clone(),
-            current: matches!(self.inner, FixInner::Ok(_)),
+            current: matches!(self.inner, FixInner::Ok(Some(_))),
         })
     }
 
@@ -200,10 +175,8 @@ impl Fix {
 
     fn place(&self) -> Option<&Place> {
         match &self.inner {
-            FixInner::None | FixInner::Nofix(None) => None,
-            FixInner::Nofix(Some(place)) | FixInner::Ok(place) | FixInner::Stale(place) => {
-                Some(place)
-            }
+            FixInner::Nofix(place) | FixInner::Ok(place) | FixInner::Stale(place) => place.as_ref(),
+            FixInner::None => None,
         }
     }
 }
@@ -256,7 +229,7 @@ impl FixStatus {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceStatus {
     /// Opening or connecting, with nothing received yet.
@@ -282,13 +255,13 @@ impl SourceStatus {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceState {
     /// The source as given on the command line, like `serial:/dev/ttyUSB0:4800`.
     pub name: String,
     pub status: SourceStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Lines that checked out as NMEA sentences.
     pub sentences: u64,
@@ -361,11 +334,8 @@ impl Target {
 }
 
 fn require_version(obj: &Map<String, Value>) -> Result<(), ReadError> {
-    let Some(value) = obj.get("v") else {
-        return Err(ReadError::Version { found: None });
-    };
-    let found = value.as_u64().and_then(|n| u32::try_from(n).ok());
-    if found == Some(VERSION) {
+    let found = obj.get("v").and_then(Value::as_u64);
+    if found == Some(u64::from(VERSION)) {
         Ok(())
     } else {
         Err(ReadError::Version { found })
@@ -383,23 +353,12 @@ fn hello(obj: &Map<String, Value>) -> Result<Message, ReadError> {
     })
 }
 
-fn state(obj: &Map<String, Value>) -> Result<Message, ReadError> {
-    let fix = obj
-        .get("fix")
-        .ok_or(ReadError::NotJson)
-        .and_then(fix_from_value)?;
-    let sources = obj
-        .get("sources")
-        .and_then(Value::as_array)
-        .ok_or(ReadError::NotJson)?;
-    let mut decoded = Vec::with_capacity(sources.len());
-    for source in sources {
-        decoded.push(source_from_value(source)?);
-    }
-    Ok(Message::State {
+fn state(obj: &Map<String, Value>) -> Option<Message> {
+    let fix = fix_from_value(obj.get("fix")?);
+    Some(Message::State {
         v: VERSION,
         fix,
-        sources: decoded,
+        sources: sources_from(obj),
     })
 }
 
@@ -418,105 +377,93 @@ fn targets(obj: &Map<String, Value>) -> Result<Message, ReadError> {
     })
 }
 
-fn source_from_value(value: &Value) -> Result<SourceState, ReadError> {
-    match value.get("status").and_then(Value::as_str) {
-        Some("connecting" | "ok" | "quiet" | "error" | "ended") => {}
-        Some(_) => return Err(ReadError::UnknownStatus),
-        None => return Err(ReadError::NotJson),
+fn sources_from(obj: &Map<String, Value>) -> Vec<SourceState> {
+    let Some(items) = obj.get("sources").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items.iter().filter_map(source_from_value).collect()
+}
+
+fn source_from_value(value: &Value) -> Option<SourceState> {
+    let obj = value.as_object()?;
+    let name = obj.get("name").and_then(Value::as_str)?.to_owned();
+    let status = source_status(obj.get("status")?)?;
+    Some(SourceState {
+        name,
+        status,
+        message: obj
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        sentences: obj.get("sentences").and_then(Value::as_u64).unwrap_or(0),
+        rejected: obj.get("rejected").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
+fn source_status(value: &Value) -> Option<SourceStatus> {
+    match value.as_str()? {
+        "connecting" => Some(SourceStatus::Connecting),
+        "ok" => Some(SourceStatus::Ok),
+        "quiet" => Some(SourceStatus::Quiet),
+        "error" => Some(SourceStatus::Error),
+        "ended" => Some(SourceStatus::Ended),
+        _ => None,
     }
-    SourceState::deserialize(value).map_err(|_| ReadError::NotJson)
 }
 
 fn target_from_value(value: &Value) -> Result<Target, ReadError> {
     let target = Target::deserialize(value).map_err(|_| ReadError::NotJson)?;
-    match (target.lat, target.lon) {
-        (Some(_), None) | (None, Some(_)) => Err(ReadError::PositionPartial),
-        _ => Ok(target),
-    }
-}
-
-fn fix_from_value(value: &Value) -> Result<Fix, ReadError> {
-    let Some(obj) = value.as_object() else {
+    if target.lat.is_some() != target.lon.is_some() {
         return Err(ReadError::NotJson);
+    }
+    Ok(target)
+}
+
+fn fix_from_value(value: &Value) -> Fix {
+    let Some(obj) = value.as_object() else {
+        return Fix::none();
     };
-    let status = match obj.get("status").and_then(Value::as_str) {
-        Some("none") => FixStatus::None,
-        Some("nofix") => FixStatus::Nofix,
-        Some("ok") => FixStatus::Ok,
-        Some("stale") => FixStatus::Stale,
-        Some(_) => return Err(ReadError::UnknownStatus),
-        None => return Err(ReadError::NotJson),
-    };
-    let lat = opt_f64(obj, "lat")?;
-    let lon = opt_f64(obj, "lon")?;
-    let age = opt_u64(obj, "ageSeconds")?;
-    match (status, lat, lon, age) {
-        (_, Some(_), None, _) | (_, None, Some(_), _) => Err(ReadError::PositionPartial),
-        (FixStatus::None, Some(_), Some(_), _) => Err(ReadError::PositionForbidden),
-        (FixStatus::Ok | FixStatus::Stale, None, None, _) => Err(ReadError::PositionMissing),
-        (FixStatus::Ok | FixStatus::Stale | FixStatus::Nofix, Some(_), Some(_), None) => {
-            Err(ReadError::PositionMissing)
-        }
-        (FixStatus::None, None, None, _) => Ok(Fix::none()),
-        (FixStatus::Nofix, None, None, _) => Ok(Fix::nofix(None)),
-        (FixStatus::Ok, Some(lat), Some(lon), Some(age_seconds)) => {
-            Ok(Fix::ok(place_from(obj, lat, lon, age_seconds)?))
-        }
-        (FixStatus::Stale, Some(lat), Some(lon), Some(age_seconds)) => {
-            Ok(Fix::stale(place_from(obj, lat, lon, age_seconds)?))
-        }
-        (FixStatus::Nofix, Some(lat), Some(lon), Some(age_seconds)) => {
-            Ok(Fix::nofix(Some(place_from(obj, lat, lon, age_seconds)?)))
-        }
+    let place = place_from(obj);
+    match obj.get("status").and_then(Value::as_str) {
+        None | Some("none") => Fix::none(),
+        Some("nofix") => Fix::nofix(place),
+        Some("ok") => Fix::with_status(FixStatus::Ok, place),
+        Some("stale") => Fix::with_status(FixStatus::Stale, place),
+        Some(_) => match place {
+            Some(place) => Fix::stale(place),
+            None => Fix::none(),
+        },
     }
 }
 
-fn place_from(
-    obj: &Map<String, Value>,
-    lat: f64,
-    lon: f64,
-    age_seconds: u64,
-) -> Result<Place, ReadError> {
-    Ok(Place {
+fn place_from(obj: &Map<String, Value>) -> Option<Place> {
+    let lat = finite_f64(obj.get("lat")?)?;
+    let lon = finite_f64(obj.get("lon")?)?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    Some(Place {
         lat,
         lon,
-        sog_kn: opt_f64(obj, "sogKn")?,
-        cog_deg: opt_f64(obj, "cogDeg")?,
-        utc: opt_string(obj, "utc")?,
-        satellites: opt_u8(obj, "satellites")?,
-        hdop: opt_f64(obj, "hdop")?,
-        age_seconds,
+        sog_kn: obj.get("sogKn").and_then(finite_f64),
+        cog_deg: obj.get("cogDeg").and_then(finite_f64),
+        utc: obj.get("utc").and_then(Value::as_str).map(str::to_owned),
+        satellites: obj.get("satellites").and_then(satellite_count),
+        hdop: obj.get("hdop").and_then(finite_f64),
+        age_seconds: obj.get("ageSeconds").and_then(Value::as_u64).unwrap_or(0),
     })
 }
 
-fn opt_f64(obj: &Map<String, Value>, key: &str) -> Result<Option<f64>, ReadError> {
-    match obj.get(key) {
-        None => Ok(None),
-        Some(value) => value.as_f64().map(Some).ok_or(ReadError::NotJson),
-    }
+fn finite_f64(value: &Value) -> Option<f64> {
+    value.as_f64().filter(|number| number.is_finite())
 }
 
-fn opt_u64(obj: &Map<String, Value>, key: &str) -> Result<Option<u64>, ReadError> {
-    match obj.get(key) {
-        None => Ok(None),
-        Some(value) => value.as_u64().map(Some).ok_or(ReadError::NotJson),
-    }
-}
-
-fn opt_u8(obj: &Map<String, Value>, key: &str) -> Result<Option<u8>, ReadError> {
-    match opt_u64(obj, key)? {
-        None => Ok(None),
-        Some(n) => u8::try_from(n).map(Some).map_err(|_| ReadError::NotJson),
-    }
-}
-
-fn opt_string(obj: &Map<String, Value>, key: &str) -> Result<Option<String>, ReadError> {
-    match obj.get(key) {
-        None => Ok(None),
-        Some(value) => value
-            .as_str()
-            .map(|text| Some(text.to_owned()))
-            .ok_or(ReadError::NotJson),
+fn satellite_count(value: &Value) -> Option<u8> {
+    let count = finite_f64(value)?;
+    if (0.0..=255.0).contains(&count) {
+        Some(count as u8)
+    } else {
+        None
     }
 }
 
@@ -531,14 +478,5 @@ fn without_nulls(value: Value) -> Value {
         ),
         Value::Array(items) => Value::Array(items.into_iter().map(without_nulls).collect()),
         other => other,
-    }
-}
-
-fn contains_null(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::Array(items) => items.iter().any(contains_null),
-        Value::Object(fields) => fields.values().any(contains_null),
-        Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
     }
 }

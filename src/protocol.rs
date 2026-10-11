@@ -16,10 +16,14 @@ mod tests {
     const PROTOCOL: &str = include_str!("../docs/protocol.md");
 
     fn state_fix(line: &str) -> Fix {
-        let Some(Message::State { fix, .. }) = Message::from_line(line).unwrap() else {
+        state_of(line).0
+    }
+
+    fn state_of(line: &str) -> (Fix, Vec<SourceState>) {
+        let Some(Message::State { fix, sources, .. }) = Message::from_line(line).unwrap() else {
             panic!("a state line");
         };
-        fix
+        (fix, sources)
     }
 
     #[test]
@@ -234,73 +238,425 @@ mod tests {
     }
 
     #[test]
-    fn version_null_and_a_broken_position_fail_closed() {
+    fn a_blank_line_is_absent_and_bad_json_is_rejected() {
         assert_eq!(Message::from_line("").unwrap(), None);
         assert_eq!(Message::from_line("\n").unwrap(), None);
-        assert_eq!(
-            Message::from_line("not json").unwrap_err(),
-            ReadError::NotJson
-        );
-        assert_eq!(
-            Message::from_line(r#"{"type":"future","v":2}"#).unwrap_err(),
-            ReadError::Version { found: Some(2) }
-        );
-        assert_eq!(
-            Message::from_line(r#"{"type":"future"}"#).unwrap_err(),
-            ReadError::Version { found: None }
-        );
+        for line in [
+            "not json",
+            "[]",
+            "null",
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":NaN,"lon":1}}"#,
+            r#"{"type":"state","v":Infinity}"#,
+            r#"{"type":"state","v":1e9999}"#,
+            r#"{"type":"hello","v":1,"keel":null}"#,
+        ] {
+            assert_eq!(
+                Message::from_line(line).unwrap_err(),
+                ReadError::NotJson,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_is_an_integer_read_before_the_other_fields() {
+        let missing = Message::from_line(r#"{"type":"future"}"#).unwrap_err();
+        assert_eq!(missing, ReadError::Version { found: None });
+        assert_eq!(missing.to_string(), "missing protocol version");
+        let two = Message::from_line(r#"{"type":"future","v":2}"#).unwrap_err();
+        assert_eq!(two, ReadError::Version { found: Some(2) });
+        assert_eq!(two.to_string(), "protocol version 2");
         assert_eq!(
             Message::from_line(r#"{"type":"future","v":1}"#).unwrap(),
             None
         );
         assert_eq!(
             Message::from_line(r#"{"type":"nope","v":null}"#).unwrap_err(),
-            ReadError::Null
+            ReadError::Version { found: None }
         );
         assert_eq!(
-            Message::from_line(r#"{"type":"state","v":1,"fix":{"status":"ok"},"sources":[]}"#)
-                .unwrap_err(),
-            ReadError::PositionMissing
+            Message::from_line(r#"{"type":"hello","v":2,"keel":null}"#).unwrap_err(),
+            ReadError::Version { found: Some(2) }
         );
+        assert_eq!(
+            Message::from_line(r#"{"type":"hello","v":0,"keel":"x"}"#).unwrap_err(),
+            ReadError::Version { found: Some(0) }
+        );
+        let huge =
+            Message::from_line(r#"{"type":"state","v":4294967296,"fix":null,"sources":null}"#)
+                .unwrap_err();
+        assert_eq!(
+            huge,
+            ReadError::Version {
+                found: Some(4_294_967_296)
+            }
+        );
+        assert_eq!(huge.to_string(), "protocol version 4294967296");
+        for line in [
+            r#"{"type":"state","v":1.0,"fix":{"status":"ok"}}"#,
+            r#"{"type":"state","v":1.5}"#,
+            r#"{"type":"state","v":"1"}"#,
+            r#"{"type":"state","v":-1}"#,
+            r#"{"type":"state","v":true}"#,
+        ] {
+            assert_eq!(
+                Message::from_line(line).unwrap_err(),
+                ReadError::Version { found: None },
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_without_a_fix_key_is_absent() {
         assert_eq!(
             Message::from_line(
-                r#"{"type":"state","v":1,"fix":{"status":"stale","lat":1.0},"sources":[]}"#
+                r#"{"type":"state","v":1,"sources":[{"name":"a","status":"ok","sentences":4,"rejected":1}]}"#
             )
-            .unwrap_err(),
-            ReadError::PositionPartial
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_fix_that_is_not_an_object_is_none_and_keeps_sources() {
+        let (fix, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":null,"sources":[{"name":"down","status":"error","message":"no carrier","sentences":1,"rejected":2}]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::None);
+        assert_eq!(fix.position(), None);
+        assert_eq!(
+            sources,
+            vec![SourceState {
+                name: "down".into(),
+                status: SourceStatus::Error,
+                message: Some("no carrier".into()),
+                sentences: 1,
+                rejected: 2,
+            }]
+        );
+        let (fix, sources) = state_of(r#"{"type":"state","v":1,"fix":"ok","sources":[]}"#);
+        assert_eq!(fix.status(), FixStatus::None);
+        assert_eq!(fix.position(), None);
+        assert_eq!(sources, vec![]);
+    }
+
+    #[test]
+    fn an_ok_place_is_current_with_its_age() {
+        let fix = state_fix(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":4},"sources":[]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Ok);
+        let pos = fix.position().expect("ok");
+        assert!(pos.current);
+        assert_eq!(pos.place.lat, 37.865);
+        assert_eq!(pos.place.lon, -122.32);
+        assert_eq!(pos.place.age_seconds, 4);
+    }
+
+    #[test]
+    fn a_missing_or_fractional_age_is_zero_and_the_fix_stays_current() {
+        for line in [
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":1.0,"lon":2.0},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":null},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":0.0},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":1.5},"sources":[]}"#,
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::Ok, "{line}");
+            let pos = fix.position().expect("ok");
+            assert!(pos.current, "{line}");
+            assert_eq!(pos.place.lat, 1.0, "{line}");
+            assert_eq!(pos.place.lon, 2.0, "{line}");
+            assert_eq!(pos.place.age_seconds, 0, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_null_note_on_an_ok_state_keeps_the_place() {
+        let fix = state_fix(
+            r#"{"type":"state","v":1,"note":null,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0},"sources":[]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Ok);
+        let pos = fix.position().expect("ok");
+        assert!(pos.current);
+        assert_eq!(pos.place.lat, 37.865);
+        assert_eq!(pos.place.lon, -122.32);
+        assert_eq!(pos.place.age_seconds, 0);
+    }
+
+    #[test]
+    fn a_mistyped_optional_field_is_absent_and_the_place_stays() {
+        let fix = state_fix(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":2,"sogKn":"fast"},"sources":[]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Ok);
+        let pos = fix.position().expect("ok");
+        assert!(pos.current);
+        assert_eq!(pos.place.lat, 37.865);
+        assert_eq!(pos.place.lon, -122.32);
+        assert_eq!(pos.place.age_seconds, 2);
+        assert_eq!(pos.place.sog_kn, None);
+    }
+
+    #[test]
+    fn satellites_truncate_inside_a_byte_and_are_absent_outside_it() {
+        let over = state_fix(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0,"satellites":300},"sources":[]}"#,
+        );
+        let pos = over.position().expect("ok");
+        assert!(pos.current);
+        assert_eq!(pos.place.satellites, None);
+        assert_eq!(over.satellites(), None);
+        let fraction = state_fix(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0,"satellites":9.7},"sources":[]}"#,
+        );
+        let pos = fraction.position().expect("ok");
+        assert!(pos.current);
+        assert_eq!(pos.place.satellites, Some(9));
+        assert_eq!(fraction.satellites(), Some(9));
+        let full = state_fix(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0,"satellites":255.0},"sources":[]}"#,
+        );
+        assert_eq!(full.position().expect("ok").place.satellites, Some(255));
+    }
+
+    #[test]
+    fn a_degree_outside_range_or_one_coordinate_is_not_a_position() {
+        for line in [
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":91,"lon":-122.32,"ageSeconds":1},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":181,"ageSeconds":1},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"ageSeconds":1},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lon":-122.32,"ageSeconds":1},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":"37.865","lon":"-122.32","ageSeconds":1},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":null,"lon":null,"ageSeconds":1},"sources":[]}"#,
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::Ok, "{line}");
+            assert_eq!(fix.position(), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_degree_limits_are_a_current_position() {
+        for (line, lat, lon) in [
+            (
+                r#"{"type":"state","v":1,"fix":{"status":"ok","lat":90,"lon":180,"ageSeconds":0},"sources":[]}"#,
+                90.0,
+                180.0,
+            ),
+            (
+                r#"{"type":"state","v":1,"fix":{"status":"ok","lat":-90,"lon":-180,"ageSeconds":0},"sources":[]}"#,
+                -90.0,
+                -180.0,
+            ),
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::Ok);
+            let pos = fix.position().expect("limit");
+            assert!(pos.current);
+            assert_eq!(pos.place.lat, lat);
+            assert_eq!(pos.place.lon, lon);
+            assert_eq!(pos.place.age_seconds, 0);
+        }
+    }
+
+    #[test]
+    fn none_and_a_missing_status_drop_a_place() {
+        for line in [
+            r#"{"type":"state","v":1,"fix":{"status":"none","lat":37.865,"lon":-122.32,"ageSeconds":3},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"lat":37.865,"lon":-122.32,"ageSeconds":3},"sources":[]}"#,
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::None, "{line}");
+            assert_eq!(fix.position(), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_status_with_a_place_is_stale() {
+        for (line, lat, lon) in [
+            (
+                r#"{"type":"state","v":1,"fix":{"status":"survey","lat":37.865,"lon":-122.32,"ageSeconds":8},"sources":[]}"#,
+                37.865,
+                -122.32,
+            ),
+            (
+                r#"{"type":"state","v":1,"fix":{"status":"NONE","lat":10,"lon":20,"ageSeconds":1},"sources":[]}"#,
+                10.0,
+                20.0,
+            ),
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::Stale, "{line}");
+            let pos = fix.position().expect("place");
+            assert!(!pos.current, "{line}");
+            assert_eq!(pos.place.lat, lat, "{line}");
+            assert_eq!(pos.place.lon, lon, "{line}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_status_without_a_place_is_none() {
+        for line in [
+            r#"{"type":"state","v":1,"fix":{"status":"survey"},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"survey","lat":91,"lon":0},"sources":[]}"#,
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::None, "{line}");
+            assert_eq!(fix.position(), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn nofix_keeps_a_place_that_is_not_current() {
+        let fix = state_fix(
+            r#"{"type":"state","v":1,"fix":{"status":"nofix","lat":37.865,"lon":-122.32},"sources":[]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Nofix);
+        let pos = fix.position().expect("nofix");
+        assert!(!pos.current);
+        assert_eq!(pos.place.lat, 37.865);
+        assert_eq!(pos.place.lon, -122.32);
+        assert_eq!(pos.place.age_seconds, 0);
+        for line in [
+            r#"{"type":"state","v":1,"fix":{"status":"nofix"},"sources":[]}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"nofix","lat":37.865},"sources":[]}"#,
+        ] {
+            let fix = state_fix(line);
+            assert_eq!(fix.status(), FixStatus::Nofix, "{line}");
+            assert_eq!(fix.position(), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn stale_without_a_place_keeps_an_error_source() {
+        let (fix, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":{"status":"stale"},"sources":[{"name":"tcp:10.0.2.2:10110","status":"error","message":"connection closed"}]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Stale);
+        assert_eq!(fix.position(), None);
+        assert_eq!(
+            sources,
+            vec![SourceState {
+                name: "tcp:10.0.2.2:10110".into(),
+                status: SourceStatus::Error,
+                message: Some("connection closed".into()),
+                sentences: 0,
+                rejected: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unknown_source_status_is_skipped() {
+        let (fix, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":1},"sources":[{"name":"a","status":"asleep","sentences":3,"rejected":1}]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Ok);
+        let pos = fix.position().expect("ok");
+        assert!(pos.current);
+        assert_eq!(pos.place.lat, 37.865);
+        assert_eq!(pos.place.lon, -122.32);
+        assert_eq!(pos.place.age_seconds, 1);
+        assert_eq!(sources, vec![]);
+
+        let (fix, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":1},"sources":[{"name":"a","status":"asleep"},{"name":"b","status":"error","message":"down","sentences":2,"rejected":3}]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::Ok);
+        assert!(fix.position().expect("ok").current);
+        assert_eq!(
+            sources,
+            vec![SourceState {
+                name: "b".into(),
+                status: SourceStatus::Error,
+                message: Some("down".into()),
+                sentences: 2,
+                rejected: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_source_without_a_name_is_skipped() {
+        let (fix, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":{"status":"none"},"sources":[{"status":"ok","sentences":1,"rejected":0},{"name":"kept","status":"connecting"}]}"#,
+        );
+        assert_eq!(fix.status(), FixStatus::None);
+        assert_eq!(fix.position(), None);
+        assert_eq!(
+            sources,
+            vec![SourceState {
+                name: "kept".into(),
+                status: SourceStatus::Connecting,
+                message: None,
+                sentences: 0,
+                rejected: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_quiet_source_without_counts_is_kept() {
+        let (_, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":{"status":"none"},"sources":[{"name":"gps","status":"quiet","message":null}]}"#,
         );
         assert_eq!(
-            Message::from_line(
-                r#"{"type":"state","v":1,"fix":{"status":"none","lat":1.0,"lon":2.0},"sources":[]}"#
-            )
-            .unwrap_err(),
-            ReadError::PositionForbidden
+            sources,
+            vec![SourceState {
+                name: "gps".into(),
+                status: SourceStatus::Quiet,
+                message: None,
+                sentences: 0,
+                rejected: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_source_message_keeps_a_newline() {
+        let (_, sources) = state_of(
+            r#"{"type":"state","v":1,"fix":{"status":"none"},"sources":[{"name":"gps","status":"error","message":"line\nbreak","sentences":0,"rejected":0}]}"#,
         );
         assert_eq!(
-            Message::from_line(
-                r#"{"type":"state","v":1,"fix":{"status":"nofix","lat":1.0,"lon":2.0},"sources":[]}"#
-            )
-            .unwrap_err(),
-            ReadError::PositionMissing
+            sources,
+            vec![SourceState {
+                name: "gps".into(),
+                status: SourceStatus::Error,
+                message: Some("line\nbreak".into()),
+                sentences: 0,
+                rejected: 0,
+            }]
         );
+    }
+
+    #[test]
+    fn a_missing_or_unshaped_sources_field_leaves_the_fix() {
+        for line in [
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0}}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0},"sources":{}}"#,
+            r#"{"type":"state","v":1,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0},"sources":null}"#,
+        ] {
+            let (fix, sources) = state_of(line);
+            assert_eq!(fix.status(), FixStatus::Ok, "{line}");
+            let pos = fix.position().expect("ok");
+            assert!(pos.current, "{line}");
+            assert_eq!(pos.place.lat, 37.865, "{line}");
+            assert_eq!(pos.place.lon, -122.32, "{line}");
+            assert_eq!(pos.place.age_seconds, 0, "{line}");
+            assert_eq!(sources, vec![], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_target_with_one_coordinate_is_not_json() {
         assert_eq!(
             Message::from_line(
                 r#"{"type":"targets","v":1,"targets":[{"mmsi":1,"lon":2.0,"danger":false}]}"#
             )
             .unwrap_err(),
-            ReadError::PositionPartial
-        );
-        assert_eq!(
-            Message::from_line(r#"{"type":"state","v":1,"fix":{"status":"lost"},"sources":[]}"#)
-                .unwrap_err(),
-            ReadError::UnknownStatus
-        );
-        assert_eq!(
-            Message::from_line(
-                r#"{"type":"state","v":1,"fix":{"status":"none"},"sources":[{"name":"a","status":"asleep","sentences":0,"rejected":0}]}"#
-            )
-            .unwrap_err(),
-            ReadError::UnknownStatus
+            ReadError::NotJson
         );
     }
 
