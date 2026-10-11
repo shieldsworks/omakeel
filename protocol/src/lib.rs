@@ -395,8 +395,8 @@ fn source_from_value(value: &Value) -> Option<SourceState> {
             .get("message")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        sentences: obj.get("sentences").and_then(Value::as_u64).unwrap_or(0),
-        rejected: obj.get("rejected").and_then(Value::as_u64).unwrap_or(0),
+        sentences: obj.get("sentences").and_then(whole_u64).unwrap_or(0),
+        rejected: obj.get("rejected").and_then(whole_u64).unwrap_or(0),
     })
 }
 
@@ -450,8 +450,19 @@ fn place_from(obj: &Map<String, Value>) -> Option<Place> {
         utc: obj.get("utc").and_then(Value::as_str).map(str::to_owned),
         satellites: obj.get("satellites").and_then(satellite_count),
         hdop: obj.get("hdop").and_then(finite_f64),
-        age_seconds: obj.get("ageSeconds").and_then(Value::as_u64).unwrap_or(0),
+        age_seconds: obj.get("ageSeconds").and_then(whole_u64).unwrap_or(0),
     })
+}
+
+fn whole_u64(value: &Value) -> Option<u64> {
+    if let Some(count) = value.as_u64() {
+        return Some(count);
+    }
+    let number = value.as_f64().filter(|number| number.is_finite())?;
+    if !(0.0..2.0_f64.powi(64)).contains(&number) || number.fract() != 0.0 {
+        return None;
+    }
+    Some(number as u64)
 }
 
 fn finite_f64(value: &Value) -> Option<f64> {

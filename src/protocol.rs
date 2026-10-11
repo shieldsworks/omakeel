@@ -373,6 +373,57 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_number_float_is_the_integer_and_a_fraction_is_not() {
+        for (age, expected) in [
+            ("5.0", 5),
+            ("1e1", 10),
+            ("12.0", 12),
+            ("0.0", 0),
+            ("18446744073709551615", u64::MAX),
+        ] {
+            let line = format!(
+                r#"{{"type":"state","v":1,"fix":{{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":{age}}},"sources":[{{"name":"gps","status":"ok","sentences":{age},"rejected":{age}}}]}}"#
+            );
+            let (fix, sources) = state_of(&line);
+            assert_eq!(
+                fix.position().expect("ok").place.age_seconds,
+                expected,
+                "{line}"
+            );
+            assert_eq!(sources[0].sentences, expected, "{line}");
+            assert_eq!(sources[0].rejected, expected, "{line}");
+        }
+        for age in ["5.5", "-1", "-5.0", "1e20"] {
+            let line = format!(
+                r#"{{"type":"state","v":1,"fix":{{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":{age}}},"sources":[{{"name":"gps","status":"ok","sentences":{age},"rejected":{age}}}]}}"#
+            );
+            let (fix, sources) = state_of(&line);
+            assert_eq!(fix.status(), FixStatus::Ok, "{line}");
+            assert!(fix.position().expect("ok").current, "{line}");
+            assert_eq!(fix.position().expect("ok").place.age_seconds, 0, "{line}");
+            assert_eq!(sources[0].sentences, 0, "{line}");
+            assert_eq!(sources[0].rejected, 0, "{line}");
+        }
+        assert_eq!(
+            Message::from_line(r#"{"type":"state","v":1.0,"fix":{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":5.0}}"#)
+                .unwrap_err(),
+            ReadError::Version { found: None }
+        );
+    }
+
+    #[test]
+    fn a_token_that_rounds_to_a_whole_f64_is_a_count() {
+        let line = r#"{"type":"state","v":1,"fix":{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":3602879701896399.5},"sources":[{"name":"gps","status":"ok","sentences":3602879701896399.5,"rejected":3602879701896399.5}]}"#;
+        let (fix, sources) = state_of(line);
+        assert_eq!(
+            fix.position().expect("ok").place.age_seconds,
+            3_602_879_701_896_399
+        );
+        assert_eq!(sources[0].sentences, 3_602_879_701_896_399);
+        assert_eq!(sources[0].rejected, 3_602_879_701_896_399);
+    }
+
+    #[test]
     fn a_null_note_on_an_ok_state_keeps_the_place() {
         let fix = state_fix(
             r#"{"type":"state","v":1,"note":null,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0},"sources":[]}"#,
