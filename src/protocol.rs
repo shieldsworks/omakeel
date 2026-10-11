@@ -412,6 +412,18 @@ mod tests {
     }
 
     #[test]
+    fn a_token_that_rounds_to_a_whole_f64_is_a_count() {
+        let line = r#"{"type":"state","v":1,"fix":{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":3602879701896399.5},"sources":[{"name":"gps","status":"ok","sentences":3602879701896399.5,"rejected":3602879701896399.5}]}"#;
+        let (fix, sources) = state_of(line);
+        assert_eq!(
+            fix.position().expect("ok").place.age_seconds,
+            3_602_879_701_896_399
+        );
+        assert_eq!(sources[0].sentences, 3_602_879_701_896_399);
+        assert_eq!(sources[0].rejected, 3_602_879_701_896_399);
+    }
+
+    #[test]
     fn a_null_note_on_an_ok_state_keeps_the_place() {
         let fix = state_fix(
             r#"{"type":"state","v":1,"note":null,"fix":{"status":"ok","lat":37.865,"lon":-122.32,"ageSeconds":0},"sources":[]}"#,
