@@ -83,6 +83,13 @@ or the wrong JSON type. A latitude outside -90..=90, or a longitude outside
 -180..=180, is not a position. The hub still sends the strict shape: known
 statuses, both coordinates or neither, integer ages, and no nulls.
 
+`ageSeconds`, `sentences`, and `rejected` are whole numbers. `from_line`
+reads a JSON integer or a finite float that is a whole number, including
+`5.0`, `1e1`, and `12.0`. A non-whole float such as `5.5`, a negative, or a
+value that is not a number is not a count. The age is then 0, and a missing
+count is 0. `NaN` and `Infinity` are not JSON, so the line is rejected. `v`
+is only the integer 1. The float `1.0` is not version 1.
+
 ### `sources`
 
 One entry per `--source`, in command-line order.

@@ -374,7 +374,13 @@ mod tests {
 
     #[test]
     fn a_whole_number_float_is_the_integer_and_a_fraction_is_not() {
-        for (age, expected) in [("5.0", 5), ("1e1", 10), ("12.0", 12), ("0.0", 0)] {
+        for (age, expected) in [
+            ("5.0", 5),
+            ("1e1", 10),
+            ("12.0", 12),
+            ("0.0", 0),
+            ("18446744073709551615", u64::MAX),
+        ] {
             let line = format!(
                 r#"{{"type":"state","v":1,"fix":{{"status":"ok","lat":1.0,"lon":2.0,"ageSeconds":{age}}},"sources":[{{"name":"gps","status":"ok","sentences":{age},"rejected":{age}}}]}}"#
             );
