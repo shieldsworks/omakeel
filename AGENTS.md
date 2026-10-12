@@ -26,10 +26,11 @@ You are not done until this passes from the repo root:
 scripts/verify.sh
 ```
 
-It runs `mise lint`, then `mise test`, then checks that `clippy.toml`'s
-`msrv` equals `rust-version`, and that verification left the checkout as it
-found it. `mise lint` is rustfmt, clippy on all targets with warnings denied,
-and `scripts/check-comments.sh`. CI runs the same script on x86_64 and
+It checks the sha256 pin on `scripts/check-comments.sh`, then runs `mise
+lint`, then `mise test`, then checks that `clippy.toml`'s `msrv` equals
+`rust-version`, and that verification left the checkout as it found it.
+`mise lint` is rustfmt, clippy on all targets with warnings denied, and
+`scripts/check-comments.sh`. CI runs the same script on x86_64 and
 aarch64, then a release build. When `ui/*.qml` exists, CI also runs qmllint
 with Quickshell's import warnings off. This repo has no `ui/` directory.
 Fix what the script reports. Never weaken the check that reported it.
@@ -52,6 +53,7 @@ To prove behavior with the hub running, follow
 | A silenced lint says why. | clippy, `allow_attributes_without_reason` |
 | No `dbg!`, `todo!`, or `unimplemented!`. | clippy |
 | No apologetic or workaround comments. | `scripts/check-comments.sh`, inside `mise lint` |
+| `scripts/check-comments.sh` matches the sha256 pin. | `scripts/verify.sh` |
 | `docs/protocol.md`'s JSON examples have the keys the hub sends, and no key is `null`. | `tests/hub.rs` |
 | Tests write only to a temp dir. | `scripts/verify.sh` |
 
@@ -108,6 +110,21 @@ warnings, so turning them on fails the build until the hits are fixed.
   `src/source.rs`, `lock` is in `src/hub.rs`, and `local_time` is in
   `src/journal.rs`. Add another only when no safe std API exists.
 
+"for now" and "temporary file" are not in the pattern. The apps use "for
+now" for the current time.
+
+`scripts/check-comments.sh` is omahoy's canonical copy, carried in this repo
+byte for byte. The pin is this sha256. A copy with any other hash is not
+this rule.
+
+```
+f3ec8a2d07e8f1e7c50770d0bb93579fc7bb0d60fc8e359a22607ba55cebc6c6  scripts/check-comments.sh
+```
+
+From the repo root, pipe that line to `sha256sum -c`. `scripts/verify.sh`
+does that before the comments step. Run the script with no arguments to
+scan the default set.
+
 ## The agent that builds a change never approves it
 
 The agent that wrote a change does not approve, merge, or mark it verified.
@@ -135,5 +152,5 @@ they ran and saw.
 - `tests/fixtures/berkeley-marina.nmea` is the synthetic sample sail.
 - `scripts/sample-sail.py` writes that sail.
 - `scripts/verify.sh` is the done command.
-- `scripts/check-comments.sh` rejects the comment words listed above.
+- `scripts/check-comments.sh` is omahoy's canonical copy. It rejects the comment words listed above.
 - `docs/protocol.md` is the socket protocol and the recording format.
