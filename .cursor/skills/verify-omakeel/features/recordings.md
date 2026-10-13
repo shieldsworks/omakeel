@@ -29,6 +29,21 @@ grep -F '$GPRMC,210003.00,A,3751.9000,N,12219.2000,W,5.0,255.0,130926,,,A*46' \
   "$run/recorded.nmea"
 ```
 
+Observed on 2026-10-13, while the hub was still up:
+
+```
+# omakeel recording v1
+1791874604288 $GPRMC,210003.00,A,3751.9000,N,12219.2000,W,5.0,255.0,130926,,,A*46
+```
+
+After the sail ended, `grep '^#' "$run/recorded.nmea"` included:
+
+```
+# 1791874604288 fix ok
+# 1791874663588 source replay:tests/fixtures/berkeley-marina.nmea ended
+# 1791874669288 fix stale · last 9 satellites, hdop 0.9 · no sentences
+```
+
 - **Refuse to overwrite.** Stop the hub, copy the file, and start a second hub on the same path.
 
 ```sh
@@ -46,6 +61,14 @@ cp "$run/recorded.nmea" "$art/recorded.nmea"
 grep -F 'recorded.nmea' "$art/clobber.err"
 cmp "$run/recorded.nmea" "$art/recorded.nmea"
 ```
+
+Observed on 2026-10-13. The second hub exited 1. stderr was:
+
+```
+omakeel: /tmp/omakeel-verify.PqaOtH/recorded.nmea: File exists (os error 17)
+```
+
+`cmp` printed nothing and exited 0. The path in the error is that run's `$run`.
 
 - **Proof.** The header and the RMC are in the file. `cmp` shows the second hub did not change it.
 

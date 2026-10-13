@@ -50,3 +50,5 @@ in order.
 - [AIS targets](./ais-targets.md) is the traffic list and the danger flag.
 - [Source status](./source-status.md) is the source name, status, and counts.
 - [Recordings](./recordings.md) is the file `--record` writes, including why the fix changed.
+- [Protocol](./protocol.md) is the newline-delimited JSON an app reads, and a client line the hub drops.
+- [Window](./window.md) is the Quickshell view. This checkout has no `ui/` tree, so the drive records `omakeel watch` instead.
