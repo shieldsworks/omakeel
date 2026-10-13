@@ -42,7 +42,7 @@ sail test in `tests/hub.rs` checks that each JSON example in
 no message carries `null`.
 
 To prove behavior with the hub running, follow
-`.cursor/skills/verify/SKILL.md` and its feature map.
+`.cursor/skills/verify-omakeel/SKILL.md` and its feature map.
 
 ## Where each rule is enforced
 

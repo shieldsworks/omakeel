@@ -30,6 +30,14 @@ grep -F '37°51.900′N' "$art/watch.txt"
 grep '^stale ' "$art/watch.txt"
 ```
 
+Observed on 2026-10-13. Exit 124. stderr empty. `watch.txt` had 153 `ok` lines and 13 `stale` lines. The first hit of each grep:
+
+```
+ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (10 ok, 0 bad)
+ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (10 ok, 0 bad)
+stale   37°51.879′N  122°19.300′W   5.0 kn  255°T  5s ago  | replay:tests/fixtures/berkeley-marina.nmea ended (156 ok, 1 bad)
+```
+
 - **Proof.** `watch.txt` shows both an `ok` line and a `stale` line. The paused-clock regression is `an_app_follows_the_sail_until_the_fix_goes_stale` in `tests/hub.rs`.
 
 ## Gotchas

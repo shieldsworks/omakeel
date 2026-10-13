@@ -41,14 +41,22 @@ replay plays the sample sail once, in real time. The source then reports
 
 ```sh
 ./target/debug/omakeel --version
-test -S "$run/sock"
-kill -0 "$(cat "$run/pid")"
-echo "pid $(cat "$run/pid") serving $run/sock"
+test -S "$run/sock" && echo "socket exists"
+kill -0 "$(cat "$run/pid")" && echo "pid $(cat "$run/pid") alive"
 ```
 
 The version line is this checkout's binary. The pid is the process this run
-started. The socket is under `$run`. Do not connect to a hub this run did
-not start.
+started. The socket is under `$run`. Connect only to that socket.
+
+Observed on 2026-10-13:
+
+```
+omakeel 0.1.0
+socket exists
+pid 3380 alive
+```
+
+The pid differs every launch.
 
 ## Drive
 
@@ -70,6 +78,15 @@ EOF
 
 `timeout` ends `watch` with exit 124 while the hub is still running. Record
 that exit and judge the output file.
+
+This checkout has no Quickshell window to open. `features/window.md`
+records the missing `ui/` directory and the `omakeel watch` lines captured
+for the same state. `serial:/dev/ttyUSB0` is absent. `features/source-status.md`
+records that error, and the `tcp:127.0.0.1:10110` run that delivered a fix.
+
+Each drive step in `features/` ends with the output captured on
+2026-10-13. A later run matches the tokens that step greps. Ages and the
+millisecond stamps differ every run.
 
 ## Evidence
 
@@ -96,3 +113,8 @@ test ! -e "$run/sock" && echo "hub removed its socket"
 ```
 
 Kill only the pid this run started. Evidence stays under `$run/artifacts`.
+On the 2026-10-13 run the socket was gone after this kill, and
+`live-fix/watch.txt` was still in `$run/artifacts/verify/`.
+
+When the hub's commands or the lines it sends change, run
+`/maintain-verification-skill` over this directory.

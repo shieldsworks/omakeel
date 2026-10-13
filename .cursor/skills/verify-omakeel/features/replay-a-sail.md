@@ -35,11 +35,34 @@ grep -F '5.0 kn' "$art/watch.txt"
 grep -F 'replay:tests/fixtures/berkeley-marina.nmea' "$art/watch.txt"
 ```
 
+Observed on 2026-10-13. Exit 124. stderr empty. The greps printed:
+
+```
+omakeel 0.1.0 · protocol v1
+ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (10 ok, 0 bad)
+ok      37°51.900′N  122°19.200′W   5.0 kn  255°T  0s ago  | replay:tests/fixtures/berkeley-marina.nmea ok (10 ok, 0 bad)
+nofix   | replay:tests/fixtures/berkeley-marina.nmea ok (1 ok, 0 bad)
+```
+
+The first lines of `watch.txt` were:
+
+```
+omakeel 0.1.0 · protocol v1
+nofix   | replay:tests/fixtures/berkeley-marina.nmea ok (1 ok, 0 bad)
+AIS    0 vessels
+```
+
 - **Second look.** The recording contains the same RMC the fixture played, and `tests/fixtures/` is unchanged.
 
 ```sh
 grep -F '$GPRMC,210003.00,A,3751.9000,N' "$run/recorded.nmea"
 test "$(git status --porcelain --untracked-files=all -- tests/fixtures)" = ""
+```
+
+Observed on 2026-10-13. The RMC grep printed one line, and `git status` printed nothing:
+
+```
+1791874604288 $GPRMC,210003.00,A,3751.9000,N,12219.2000,W,5.0,255.0,130926,,,A*46
 ```
 
 - **Proof.** `watch.txt` is the transcript. The recording is the second look.
