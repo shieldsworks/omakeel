@@ -7,7 +7,11 @@
     reason = "a panic is how an integration test fails"
 )]
 
-use omakeel::probe::{Budget, Report, Target, probe_all};
+use omakeel::{
+    hub::{self, Config},
+    probe::{Budget, Report, Target, probe_all},
+    source::Spec,
+};
 use std::{
     fs::File,
     io::Write,
@@ -259,4 +263,83 @@ fn a_tcp_stream_is_listened_to_and_a_closed_port_is_unreachable() {
         lines(&[&live], BUDGET),
         [format!("{live}  unreachable  connection refused")]
     );
+}
+
+fn serial_hub(name: &str, pty: &Pty) -> (PathBuf, tokio::task::JoinHandle<std::io::Result<()>>) {
+    let dir = std::env::temp_dir().join(format!("omakeel-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("keel.sock");
+    let config = Config {
+        sources: vec![Spec::Serial {
+            path: pty.path.clone(),
+            baud: 4800,
+        }],
+        socket: socket.clone(),
+        record: None,
+    };
+    (socket, tokio::spawn(hub::run(config)))
+}
+
+#[tokio::test]
+async fn a_port_the_running_hub_reads_is_busy_to_a_probe_and_left_alone() {
+    let pty = pty();
+    let _talker = Talker::start(&pty.master);
+    let path = pty.path.display().to_string();
+    let (_socket, hub) = serial_hub("probe-hub", &pty);
+    let mut out = Vec::new();
+    for _ in 0..100 {
+        out = lines(&[&path], BUDGET);
+        if out[0].ends_with("  busy") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(out, [format!("serial:{path}  busy")]);
+    // A probe at another baud must not retune what the hub is reading.
+    assert_eq!(
+        lines(&[&format!("serial:{path}:9600")], BUDGET),
+        [format!("serial:{path}:9600  busy")]
+    );
+    let after = termios_of(&pty.slave);
+    assert_eq!(
+        // SAFETY: `after` is a termios that `tcgetattr` filled in.
+        unsafe { libc::cfgetispeed(&after) },
+        libc::B4800
+    );
+    assert!(!hub.is_finished());
+    hub.abort();
+}
+
+#[tokio::test]
+async fn a_hub_whose_port_is_held_says_so() {
+    let pty = pty();
+    exclusive(&pty.slave, true);
+    let (socket, hub) = serial_hub("hub-busy", &pty);
+    let mut state = String::new();
+    for _ in 0..100 {
+        if let Ok(text) = connect_and_read(&socket).await
+            && text.contains("busy: another program has the port open")
+        {
+            state = text;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(state.contains("\"status\":\"error\""), "{state}");
+    hub.abort();
+}
+
+async fn connect_and_read(socket: &std::path::Path) -> std::io::Result<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    let mut lines = BufReader::new(stream).lines();
+    let mut text = String::new();
+    while let Ok(Some(line)) = tokio::time::timeout(Duration::from_millis(100), lines.next_line())
+        .await
+        .unwrap_or(Ok(None))
+    {
+        text.push_str(&line);
+    }
+    Ok(text)
 }

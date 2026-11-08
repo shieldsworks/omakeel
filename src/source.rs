@@ -222,11 +222,45 @@ fn speed(baud: u32) -> Option<libc::speed_t> {
     })
 }
 
-/// Opens a serial device raw at `baud`, as a GPS or AIS receiver expects.
-fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
-    let device = open_device(path, false)?;
-    configure(&device, baud, 1, 0)?;
-    Ok(device)
+/// A serial port the hub reads. It is exclusive, so `omakeel probe` or
+/// another program can't open it, change its baud and take bytes meant for
+/// the hub. Exclusive mode is cleared when this is dropped.
+struct HubPort(File);
+
+impl Read for HubPort {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Drop for HubPort {
+    fn drop(&mut self) {
+        // SAFETY: `fd` is open for the life of `self.0`, and TIOCNXCL takes
+        // no argument. A port that has gone away fails the call, and there
+        // is nothing left to clear. The kernel keeps exclusive mode until
+        // the last open of the port closes, so it is cleared here too.
+        unsafe {
+            libc::ioctl(self.0.as_raw_fd(), libc::TIOCNXCL);
+        }
+    }
+}
+
+/// Opens a serial device raw at `baud`, as a GPS or AIS receiver expects,
+/// and holds it exclusively.
+fn open_serial(path: &Path, baud: u32) -> io::Result<HubPort> {
+    let device = open_device(path, true).map_err(|e| {
+        if e.kind() == io::ErrorKind::ResourceBusy {
+            io::Error::new(
+                e.kind(),
+                "busy: another program has the port open (a probe, a terminal, or a second omakeel)",
+            )
+        } else {
+            e
+        }
+    })?;
+    let port = HubPort(device);
+    configure(&port.0, baud, 1, 0)?;
+    Ok(port)
 }
 
 /// Opens a device non-blocking, so a port that would wait for carrier

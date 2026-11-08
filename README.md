@@ -140,7 +140,9 @@ The verdict is `ok`, `denied` (add yourself to the `uucp` group), `busy`
 `--source`, baud included, so copy it as is. `fix` counts sentences with a
 real position, `ais` counts AIS sentences, and `rejected` counts lines that
 failed their checksum. `at` is the last position heard. The port is opened
-exclusively and put back the way it was found. Probe exits 0 whether or not
+exclusively and put back the way it was found. A running `omakeel run` holds
+its serial ports exclusively too, so probing one of them says `busy` and
+changes nothing, and a port something else holds is an error on that source. Probe exits 0 whether or not
 it found anything.
 
 A phone sharing its GPS over Wi-Fi works too: `--source tcp:192.168.1.20:10110`.
