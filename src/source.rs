@@ -1,4 +1,5 @@
-//! Where sentences come from: a serial port, a TCP stream, or a recording.
+//! Where sentences come from: a serial port, a TCP stream, a recording, or
+//! the built-in demo sail.
 
 use crate::protocol::SourceStatus;
 use std::{
@@ -11,7 +12,7 @@ use std::{
     thread,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader as AsyncBufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader as AsyncBufReader},
     net::TcpStream,
     sync::mpsc,
     time::{Duration, Instant, sleep, sleep_until},
@@ -27,6 +28,10 @@ const MAX_RECORD: u64 = 2 * MAX_LINE;
 const RETRY: Duration = Duration::from_secs(2);
 /// NMEA 0183's standard rate, and the GlobalSat BU-353-S4's.
 const DEFAULT_BAUD: u32 = 4800;
+/// The sample sail, for a boat with no receiver yet.
+const DEMO: &[u8] = include_bytes!("../tests/fixtures/berkeley-marina.nmea");
+/// Silence between the end of one lap of the demo and the start of the next.
+const DEMO_GAP: Duration = Duration::from_secs(1);
 
 pub(crate) enum Event {
     Line {
@@ -46,9 +51,18 @@ pub(crate) enum Event {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Spec {
-    Serial { path: PathBuf, baud: u32 },
-    Tcp { address: String },
-    Replay { path: PathBuf },
+    Serial {
+        path: PathBuf,
+        baud: u32,
+    },
+    Tcp {
+        address: String,
+    },
+    Replay {
+        path: PathBuf,
+    },
+    /// The sample sail, compiled in, played in real time and looped forever.
+    Demo,
 }
 
 impl FromStr for Spec {
@@ -57,9 +71,12 @@ impl FromStr for Spec {
     fn from_str(spec: &str) -> Result<Spec, String> {
         let bad = || {
             format!(
-                "'{spec}' is not a source; use serial:PATH[:BAUD], tcp:HOST:PORT or replay:FILE"
+                "'{spec}' is not a source; use serial:PATH[:BAUD], tcp:HOST:PORT, replay:FILE or demo"
             )
         };
+        if spec == "demo" {
+            return Ok(Spec::Demo);
+        }
         let (kind, rest) = spec.split_once(':').ok_or_else(bad)?;
         if rest.is_empty() {
             return Err(bad());
@@ -95,12 +112,25 @@ impl FromStr for Spec {
     }
 }
 
+/// Refuses a demo beside any other source: its positions would pass as real.
+pub fn check_mix(sources: &[Spec]) -> Result<(), String> {
+    if sources.len() > 1 && sources.contains(&Spec::Demo) {
+        return Err(
+            "demo can't run beside real receivers: its positions would pass as real. \
+             Use demo alone"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl fmt::Display for Spec {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Spec::Serial { path, baud } => write!(f, "serial:{}:{baud}", path.display()),
             Spec::Tcp { address } => write!(f, "tcp:{address}"),
             Spec::Replay { path } => write!(f, "replay:{}", path.display()),
+            Spec::Demo => f.write_str("demo"),
         }
     }
 }
@@ -118,6 +148,9 @@ pub(crate) fn spawn(source: usize, spec: Spec, events: mpsc::Sender<Event>) {
         }
         Spec::Replay { path } => {
             tokio::spawn(replay(source, path, events));
+        }
+        Spec::Demo => {
+            tokio::spawn(demo(source, events));
         }
     }
 }
@@ -294,13 +327,64 @@ async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
             return;
         }
     };
-    let mut reader = AsyncBufReader::new(file);
+    match play(source, file, Instant::now(), &events).await {
+        Pass::Done(_) => {
+            let _ = events
+                .send(Event::Status {
+                    source,
+                    status: SourceStatus::Ended,
+                    message: None,
+                })
+                .await;
+        }
+        Pass::Closed => {}
+        Pass::Failed(e) => {
+            let _ = events
+                .send(failed(source, format!("{}: {e}", path.display())))
+                .await;
+        }
+    }
+}
+
+/// Plays the demo sail over and over, each lap `DEMO_GAP` after the last
+/// line of the one before, so the source never ends.
+async fn demo(source: usize, events: mpsc::Sender<Event>) {
+    let mut start = Instant::now();
+    loop {
+        match play(source, DEMO, start, &events).await {
+            Pass::Done(span) => start += span + DEMO_GAP,
+            Pass::Closed => return,
+            Pass::Failed(e) => {
+                let _ = events.send(failed(source, format!("demo: {e}"))).await;
+                return;
+            }
+        }
+    }
+}
+
+enum Pass {
+    /// Every line was sent; the recording spans this long.
+    Done(Duration),
+    /// The hub is gone.
+    Closed,
+    Failed(io::Error),
+}
+
+/// Sends a recording's lines as `source`, each at its recorded offset from
+/// `start`.
+async fn play(
+    source: usize,
+    recording: impl AsyncRead + Unpin,
+    start: Instant,
+    events: &mpsc::Sender<Event>,
+) -> Pass {
+    let mut reader = AsyncBufReader::new(recording);
     let mut buf = Vec::new();
-    let start = Instant::now();
     let mut first = None;
+    let mut span = 0;
     loop {
         if events.is_closed() {
-            return; // the hub is gone; don't keep scanning
+            return Pass::Closed; // the hub is gone; don't keep scanning
         }
         buf.clear();
         match (&mut reader)
@@ -308,14 +392,9 @@ async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
             .read_until(b'\n', &mut buf)
             .await
         {
-            Ok(0) => break,
+            Ok(0) => return Pass::Done(Duration::from_millis(span)),
             Ok(_) => {}
-            Err(e) => {
-                let _ = events
-                    .send(failed(source, format!("{}: {e}", path.display())))
-                    .await;
-                return;
-            }
+            Err(e) => return Pass::Failed(e),
         }
         let record = String::from_utf8_lossy(&buf);
         let record = record.trim();
@@ -327,23 +406,17 @@ async fn replay(source: usize, path: PathBuf, events: mpsc::Sender<Event>) {
         };
         let Ok(ms) = ms.parse::<u64>() else { continue };
         let offset = ms.saturating_sub(*first.get_or_insert(ms));
+        span = span.max(offset);
         tokio::select! {
             () = sleep_until(start + Duration::from_millis(offset)) => {}
-            () = events.closed() => return,
+            () = events.closed() => return Pass::Closed,
         }
         if let Some(event) = line(source, sentence.as_bytes())
             && events.send(event).await.is_err()
         {
-            return;
+            return Pass::Closed;
         }
     }
-    let _ = events
-        .send(Event::Status {
-            source,
-            status: SourceStatus::Ended,
-            message: None,
-        })
-        .await;
 }
 
 #[cfg(test)]
@@ -357,8 +430,24 @@ mod tests {
             ("serial:/dev/ttyACM0:38400", "serial:/dev/ttyACM0:38400"),
             ("tcp:192.168.1.20:10110", "tcp:192.168.1.20:10110"),
             ("replay:sails/first.nmea", "replay:sails/first.nmea"),
+            ("demo", "demo"),
         ] {
             assert_eq!(spec.parse::<Spec>().unwrap().to_string(), name);
+        }
+    }
+
+    #[test]
+    fn demo_alone_is_fine_but_never_beside_another_source() {
+        let demo: Spec = "demo".parse().unwrap();
+        let tcp: Spec = "tcp:10.0.0.1:10110".parse().unwrap();
+        assert!(check_mix(std::slice::from_ref(&demo)).is_ok());
+        assert!(check_mix(&[tcp.clone(), tcp.clone()]).is_ok());
+        for mix in [[demo.clone(), tcp.clone()], [tcp, demo]] {
+            let err = check_mix(&mix).unwrap_err();
+            assert!(
+                err.contains("demo can't run beside real receivers"),
+                "{err}"
+            );
         }
     }
 
@@ -371,6 +460,7 @@ mod tests {
             "serial:/dev/ttyUSB0:1200",
             "tcp:nohost",
             "usb:/dev/x",
+            "demo:x",
         ] {
             assert!(spec.parse::<Spec>().is_err(), "{spec}");
         }
@@ -404,6 +494,36 @@ mod tests {
             })
         ));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn demo_wraps_around_and_never_ends() {
+        let sail = std::str::from_utf8(DEMO).unwrap();
+        let sentences: Vec<&str> = sail
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| l.split_once(' ').unwrap().1)
+            .collect();
+        let (tx, mut rx) = mpsc::channel(8);
+        let start = Instant::now();
+        spawn(0, Spec::Demo, tx);
+        let mut heard = Vec::new();
+        for _ in 0..sentences.len() + 2 {
+            let Some(Event::Line { line, .. }) = rx.recv().await else {
+                panic!("the demo never ends, so only lines come");
+            };
+            heard.push((line, start.elapsed().as_millis()));
+        }
+        let lap = heard.len() - 2;
+        assert_eq!(heard[0].0, sentences[0]);
+        assert_eq!(heard[0].1, 0);
+        assert_eq!(heard[lap - 1].0, sentences[lap - 1]);
+        assert_eq!(heard[lap].0, sentences[0], "the second lap starts over");
+        assert_eq!(heard[lap + 1].0, sentences[1]);
+        // The sail spans 62.3 s; the second lap starts a second after it.
+        assert_eq!(heard[lap - 1].1, 62_300);
+        assert_eq!(heard[lap].1, 63_300);
+        assert_eq!(heard[lap + 1].1, 63_340);
     }
 
     #[tokio::test]

@@ -1,4 +1,8 @@
-use omakeel::{hub, source::Spec, watch};
+use omakeel::{
+    hub,
+    source::{self, Spec},
+    watch,
+};
 use std::{env, path::PathBuf, process::ExitCode};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -11,6 +15,7 @@ sources:
   serial:/dev/ttyUSB0[:BAUD]  a serial or USB NMEA device; BAUD defaults to 4800
   tcp:HOST:PORT               an NMEA stream over TCP, like a phone sharing its GPS
   replay:FILE                 a recording made with --record, in real time
+  demo                        the built-in sample sail, in real time, looping forever
 
 --record FILE saves every line received, with the time it arrived. It never
 overwrites an existing file. The socket defaults to
@@ -55,6 +60,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     if options.sources.is_empty() {
         return Err(format!("run needs at least one --source\n\n{USAGE}"));
     }
+    source::check_mix(&options.sources)?;
     let config = hub::Config {
         socket: options.socket()?,
         sources: options.sources,
