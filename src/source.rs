@@ -112,6 +112,18 @@ impl FromStr for Spec {
     }
 }
 
+/// Refuses a demo beside any other source: its positions would pass as real.
+pub fn check_mix(sources: &[Spec]) -> Result<(), String> {
+    if sources.len() > 1 && sources.contains(&Spec::Demo) {
+        return Err(
+            "demo can't run beside real receivers: its positions would pass as real. \
+             Use demo alone"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl fmt::Display for Spec {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -421,6 +433,21 @@ mod tests {
             ("demo", "demo"),
         ] {
             assert_eq!(spec.parse::<Spec>().unwrap().to_string(), name);
+        }
+    }
+
+    #[test]
+    fn demo_alone_is_fine_but_never_beside_another_source() {
+        let demo: Spec = "demo".parse().unwrap();
+        let tcp: Spec = "tcp:10.0.0.1:10110".parse().unwrap();
+        assert!(check_mix(std::slice::from_ref(&demo)).is_ok());
+        assert!(check_mix(&[tcp.clone(), tcp.clone()]).is_ok());
+        for mix in [[demo.clone(), tcp.clone()], [tcp, demo]] {
+            let err = check_mix(&mix).unwrap_err();
+            assert!(
+                err.contains("demo can't run beside real receivers"),
+                "{err}"
+            );
         }
     }
 

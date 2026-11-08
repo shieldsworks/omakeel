@@ -1,4 +1,8 @@
-use omakeel::{hub, source::Spec, watch};
+use omakeel::{
+    hub,
+    source::{self, Spec},
+    watch,
+};
 use std::{env, path::PathBuf, process::ExitCode};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -56,6 +60,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     if options.sources.is_empty() {
         return Err(format!("run needs at least one --source\n\n{USAGE}"));
     }
+    source::check_mix(&options.sources)?;
     let config = hub::Config {
         socket: options.socket()?,
         sources: options.sources,

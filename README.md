@@ -70,6 +70,8 @@ ok      37°51.897′N  122°19.215′W   5.0 kn  255°T  0s ago  | replay:tests
 
 No receiver yet? `omakeel run --source demo` plays the same sail from inside
 the binary, over and over, and calls itself `demo` in the state's sources.
+Demo runs alone: `omakeel run` refuses it beside another source, because its
+positions would pass as real.
 
 The sample's vessels are invented. BAY RUNNER is a ferry set to cross 0.2 nm
 from the boat, to show the collision alarm.
