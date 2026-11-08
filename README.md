@@ -145,6 +145,40 @@ its serial ports exclusively too, so probing one of them says `busy` and
 changes nothing, and a port something else holds is an error on that source. Probe exits 0 whether or not
 it found anything.
 
+### Config and the service
+
+`omakeel run` with no `--source` reads `~/.config/omakeel/config.toml`
+(`$XDG_CONFIG_HOME` is honored, and `OMAKEEL_CONFIG` names another file). It
+is the same flat `key = value` file as the other apps use, with `source`
+repeated once per source, each a `--source` SPEC:
+
+```
+source = serial:/dev/serial/by-id/usb-Prolific_Technology_Inc._USB-Serial_Controller-if00-port0:4800
+source = serial:/dev/serial/by-id/usb-dAISy_AIS_Receiver_0001-if00:38400
+```
+
+`source = demo` plays the built-in sample sail, for a boat with no receiver.
+Any `--source` flag replaces the config's sources. An unknown key or a bad
+source is reported on stderr, with its line number, and skipped. With no
+sources from either place, `run` stops and says to run `omahoy` or pass
+`--source`, listing the lines it could not use. `demo` alone is fine, but
+not beside another source, in the config or in flags.
+
+`omakeel watch --once` connects, prints the first full state and exits 0:
+a `fix STATUS [LAT,LON] [AGEs]` line, then one `source NAME STATUS [MESSAGE]`
+line per source. With no hub running it says so on stderr and exits 1.
+
+```
+fix ok 37.8650000,-122.3200000 0s
+source demo ok
+```
+
+`dist/omakeel.service` is a systemd user unit that runs
+`~/.local/bin/omakeel run` and restarts it 2 seconds after a failure. Link it
+into `~/.config/systemd/user/` and `systemctl --user enable --now omakeel`.
+A running service holds the serial ports, so `omakeel probe` reports them
+`busy`; stop the service first.
+
 A phone sharing its GPS over Wi-Fi works too: `--source tcp:192.168.1.20:10110`.
 
 **In a VM with no USB**, such as Try Omarchy on a Mac, share the GPS from the

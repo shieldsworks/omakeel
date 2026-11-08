@@ -1,0 +1,10 @@
+[Unit]
+Description=Omakeel, the Omahoy data hub
+
+[Service]
+ExecStart=%h/.local/bin/omakeel run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
