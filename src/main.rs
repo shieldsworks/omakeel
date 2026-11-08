@@ -1,14 +1,10 @@
-use omakeel::{
-    hub, probe,
-    source::{self, Spec},
-    watch,
-};
+use omakeel::{config, hub, probe, source::Spec, watch};
 use std::{env, path::PathBuf, process::ExitCode};
 use tokio::signal::unix::{SignalKind, signal};
 
 const USAGE: &str = "\
-usage: omakeel run --source SPEC [--source SPEC ...] [--record FILE] [--socket PATH]
-       omakeel watch [--socket PATH]
+usage: omakeel run [--source SPEC ...] [--record FILE] [--socket PATH]
+       omakeel watch [--once] [--socket PATH]
        omakeel probe [TARGET...]
        omakeel --version
 
@@ -17,6 +13,15 @@ sources:
   tcp:HOST:PORT               an NMEA stream over TCP, like a phone sharing its GPS
   replay:FILE                 a recording made with --record, in real time
   demo                        the built-in sample sail, in real time, looping forever
+
+With no --source, run reads the `source = SPEC` lines of
+~/.config/omakeel/config.toml ($OMAKEEL_CONFIG names another file). Any
+--source replaces them. Unknown keys and bad sources there are reported on
+stderr and skipped.
+
+watch --once prints the hub's first state and exits: a `fix STATUS [LAT,LON]
+[AGEs]` line, then `source NAME STATUS [MESSAGE]` for each source. It exits 1
+when no hub is running.
 
 probe listens to each TARGET and says what is on the other end. A TARGET is
 a device path or serial:PATH (every baud rate is tried), serial:PATH:BAUD, or
@@ -47,8 +52,14 @@ fn run(args: &[String]) -> Result<(), String> {
     match command.as_str() {
         "run" => serve(rest),
         "watch" => {
-            let socket = Options::parse(rest, &["--socket"])?.socket()?;
-            watch::run(&socket).map_err(|e| e.to_string())
+            let options = Options::parse(rest, &["--socket", "--once"])?;
+            let socket = options.socket()?;
+            if options.once {
+                watch::once(&socket, &mut std::io::stdout().lock())
+            } else {
+                watch::run(&socket)
+            }
+            .map_err(|e| e.to_string())
         }
         "probe" => probe::run(rest),
         "--version" | "version" => {
@@ -65,13 +76,14 @@ fn run(args: &[String]) -> Result<(), String> {
 
 fn serve(args: &[String]) -> Result<(), String> {
     let options = Options::parse(args, &["--source", "--record", "--socket"])?;
-    if options.sources.is_empty() {
-        return Err(format!("run needs at least one --source\n\n{USAGE}"));
+    let socket = options.socket()?;
+    let (sources, problems) = config::sources(options.sources, &config::default_path()?)?;
+    for problem in problems {
+        eprintln!("omakeel: {problem}");
     }
-    source::check_mix(&options.sources)?;
     let config = hub::Config {
-        socket: options.socket()?,
-        sources: options.sources,
+        socket,
+        sources,
         record: options.record,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -93,6 +105,7 @@ struct Options {
     sources: Vec<Spec>,
     record: Option<PathBuf>,
     socket: Option<PathBuf>,
+    once: bool,
 }
 
 impl Options {
@@ -102,6 +115,10 @@ impl Options {
         while let Some(flag) = args.next() {
             if !allowed.contains(&flag.as_str()) {
                 return Err(format!("unexpected '{flag}'\n\n{USAGE}"));
+            }
+            if flag == "--once" {
+                options.once = true;
+                continue;
             }
             let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
             match flag.as_str() {

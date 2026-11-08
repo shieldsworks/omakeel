@@ -139,6 +139,7 @@ they ran and saw.
 ## Layout
 
 - `src/main.rs` parses `run`, `watch`, `probe`, and `--version`.
+- `src/config.rs` reads `~/.config/omakeel/config.toml`, the sources `run` uses when no `--source` is given.
 - `src/hub.rs` takes sources in and sends the fix and the traffic out. It binds the socket and holds the lock.
 - `src/source.rs` reads serial, TCP, and replayed recordings.
 - `src/nmea.rs` checks NMEA 0183 framing and checksums, and reads RMC and GGA.
@@ -148,10 +149,11 @@ they ran and saw.
 - `src/journal.rs` writes the recording's status comments, and stderr on its own thread.
 - `protocol/` is the `omakeel-protocol` crate: the wire messages `docs/protocol.md` specifies. `src/protocol.rs` re-exports that crate, so the daemon and a client share one type.
 - `src/probe.rs` is `omakeel probe`: what a serial port or TCP stream carries, by sweeping baud rates.
-- `src/watch.rs` is `omakeel watch`, one line per change.
+- `src/watch.rs` is `omakeel watch`, one line per change, or with `--once` the first state.
 - `tests/hub.rs` runs the hub end to end on the sample sail, on a paused clock.
 - `tests/fixtures/berkeley-marina.nmea` is the synthetic sample sail.
 - `scripts/sample-sail.py` writes that sail.
 - `scripts/verify.sh` is the done command.
 - `scripts/check-comments.sh` is omahoy's canonical copy. It rejects the comment words listed above.
+- `dist/omakeel.service` is the systemd user unit.
 - `docs/protocol.md` is the socket protocol and the recording format.

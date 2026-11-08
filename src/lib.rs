@@ -2,6 +2,7 @@
 //! one live state out to every app. `docs/protocol.md` is the contract.
 
 pub(crate) mod ais;
+pub mod config;
 pub(crate) mod fix;
 pub mod hub;
 pub(crate) mod journal;
