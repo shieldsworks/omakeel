@@ -11,6 +11,7 @@ sources:
   serial:/dev/ttyUSB0[:BAUD]  a serial or USB NMEA device; BAUD defaults to 4800
   tcp:HOST:PORT               an NMEA stream over TCP, like a phone sharing its GPS
   replay:FILE                 a recording made with --record, in real time
+  demo                        the built-in sample sail, in real time, looping forever
 
 --record FILE saves every line received, with the time it arrived. It never
 overwrites an existing file. The socket defaults to

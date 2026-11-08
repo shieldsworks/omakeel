@@ -96,8 +96,8 @@ rejected. `v` is only the integer 1. The float `1.0` is not version 1.
 
 One entry per `--source`, in command-line order.
 
-- `name` is the source as given: `serial:PATH:BAUD`, `tcp:HOST:PORT` or
-  `replay:FILE`.
+- `name` is the source as given: `serial:PATH:BAUD`, `tcp:HOST:PORT`,
+  `replay:FILE` or `demo`.
 - `status` is one of:
   - `connecting`: nothing received yet. A serial or TCP source that is
     reached again after an `error` goes back to `connecting` until its
@@ -109,7 +109,7 @@ One entry per `--source`, in command-line order.
   - `error`: can't be opened or reached, and `message` says why. Serial and
     TCP sources retry every 2 seconds. A replay that can't be read stays in
     `error`.
-  - `ended`: a replay reached the end of its recording.
+  - `ended`: a replay reached the end of its recording. `demo` never ends.
 - `sentences` counts lines that checked out as NMEA sentences. `rejected`
   counts the rest: bad checksums and garbage.
 
@@ -240,3 +240,8 @@ never overwrites an existing file.
 
 `replay:FILE` plays a recording back in real time. FILE must be a regular
 file. It plays once, then the source reports `ended` and the fix goes stale.
+
+`demo` is the sample sail, built into omakeel. It plays in real time like a
+replay and starts over a second after its last line, so it never ends and
+the fix never goes stale. Its position is Berkeley Marina, and its vessels
+are invented.
