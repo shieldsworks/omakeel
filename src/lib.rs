@@ -6,6 +6,7 @@ pub(crate) mod fix;
 pub mod hub;
 pub(crate) mod journal;
 pub(crate) mod nmea;
+pub mod probe;
 pub mod protocol;
 pub mod source;
 pub(crate) mod targets;

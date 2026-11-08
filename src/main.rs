@@ -1,5 +1,5 @@
 use omakeel::{
-    hub,
+    hub, probe,
     source::{self, Spec},
     watch,
 };
@@ -9,6 +9,7 @@ use tokio::signal::unix::{SignalKind, signal};
 const USAGE: &str = "\
 usage: omakeel run --source SPEC [--source SPEC ...] [--record FILE] [--socket PATH]
        omakeel watch [--socket PATH]
+       omakeel probe [TARGET...]
        omakeel --version
 
 sources:
@@ -16,6 +17,12 @@ sources:
   tcp:HOST:PORT               an NMEA stream over TCP, like a phone sharing its GPS
   replay:FILE                 a recording made with --record, in real time
   demo                        the built-in sample sail, in real time, looping forever
+
+probe listens to each TARGET and says what is on the other end. A TARGET is
+a device path or serial:PATH (every baud rate is tried), serial:PATH:BAUD, or
+tcp:HOST:PORT. With none, it scans /dev/serial/by-id. An ok line starts with
+a --source SPEC. The other verdicts are denied, busy, silent, missing and
+unreachable.
 
 --record FILE saves every line received, with the time it arrived. It never
 overwrites an existing file. The socket defaults to
@@ -43,6 +50,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let socket = Options::parse(rest, &["--socket"])?.socket()?;
             watch::run(&socket).map_err(|e| e.to_string())
         }
+        "probe" => probe::run(rest),
         "--version" | "version" => {
             println!("omakeel {}", env!("CARGO_PKG_VERSION"));
             Ok(())

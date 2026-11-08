@@ -106,7 +106,7 @@ warnings, so turning them on fails the build until the hits are fixed.
   GDAL, geo, proj, or any map library.
   Serial ports use termios through `libc`. Always pass `--locked`. Change
   `Cargo.lock` only in a PR about dependencies.
-- `unsafe` stays in the three libc wrappers. `open_serial` is in
+- `unsafe` stays in the libc wrappers. `open_serial` and `ProbePort` are in
   `src/source.rs`, `lock` is in `src/hub.rs`, and `local_time` is in
   `src/journal.rs`. Add another only when no safe std API exists.
 
@@ -138,7 +138,7 @@ they ran and saw.
 
 ## Layout
 
-- `src/main.rs` parses `run`, `watch`, and `--version`.
+- `src/main.rs` parses `run`, `watch`, `probe`, and `--version`.
 - `src/hub.rs` takes sources in and sends the fix and the traffic out. It binds the socket and holds the lock.
 - `src/source.rs` reads serial, TCP, and replayed recordings.
 - `src/nmea.rs` checks NMEA 0183 framing and checksums, and reads RMC and GGA.
@@ -147,6 +147,7 @@ they ran and saw.
 - `src/targets.rs` holds the vessel table, range, bearing, CPA, and the danger flag.
 - `src/journal.rs` writes the recording's status comments, and stderr on its own thread.
 - `protocol/` is the `omakeel-protocol` crate: the wire messages `docs/protocol.md` specifies. `src/protocol.rs` re-exports that crate, so the daemon and a client share one type.
+- `src/probe.rs` is `omakeel probe`: what a serial port or TCP stream carries, by sweeping baud rates.
 - `src/watch.rs` is `omakeel watch`, one line per change.
 - `tests/hub.rs` runs the hub end to end on the sample sail, on a paused clock.
 - `tests/fixtures/berkeley-marina.nmea` is the synthetic sample sail.

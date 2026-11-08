@@ -83,21 +83,8 @@ impl FromStr for Spec {
         }
         match kind {
             "serial" => {
-                let (path, baud) = match rest.rsplit_once(':') {
-                    Some((path, baud))
-                        if !path.is_empty()
-                            && !baud.is_empty()
-                            && baud.bytes().all(|b| b.is_ascii_digit()) =>
-                    {
-                        (path, baud.parse().map_err(|_| bad())?)
-                    }
-                    _ => (rest, DEFAULT_BAUD),
-                };
-                if speed(baud).is_none() {
-                    return Err(format!(
-                        "{baud} baud isn't supported; use 4800, 9600, 19200, 38400, 57600 or 115200"
-                    ));
-                }
+                let (path, baud) = serial_parts(rest)?;
+                let baud = baud.unwrap_or(DEFAULT_BAUD);
                 Ok(Spec::Serial {
                     path: path.into(),
                     baud,
@@ -122,6 +109,25 @@ pub fn check_mix(sources: &[Spec]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Splits `PATH[:BAUD]`, checking that a baud rate is one the port can be set to.
+pub(crate) fn serial_parts(rest: &str) -> Result<(&str, Option<u32>), String> {
+    let Some((path, baud)) = rest.rsplit_once(':') else {
+        return Ok((rest, None));
+    };
+    if path.is_empty() || baud.is_empty() || !baud.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok((rest, None));
+    }
+    let baud: u32 = baud
+        .parse()
+        .map_err(|_| format!("{baud} baud isn't supported"))?;
+    if speed(baud).is_none() {
+        return Err(format!(
+            "{baud} baud isn't supported; use 4800, 9600, 19200, 38400, 57600 or 115200"
+        ));
+    }
+    Ok((path, Some(baud)))
 }
 
 impl fmt::Display for Spec {
@@ -216,16 +222,71 @@ fn speed(baud: u32) -> Option<libc::speed_t> {
     })
 }
 
-/// Opens a serial device raw at `baud`, as a GPS or AIS receiver expects.
-fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
-    let speed = speed(baud).ok_or_else(|| io::Error::other("unsupported baud rate"))?;
-    // Non-blocking, so a port that would wait for carrier detect can't hang
-    // the open. A GPS has no modem lines; CLOCAL below says so, and then
-    // reads go back to blocking.
+/// A serial port the hub reads. It is exclusive, so `omakeel probe` or
+/// another program can't open it, change its baud and take bytes meant for
+/// the hub. Exclusive mode is cleared when this is dropped.
+struct HubPort(File);
+
+impl Read for HubPort {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Drop for HubPort {
+    fn drop(&mut self) {
+        // SAFETY: `fd` is open for the life of `self.0`, and TIOCNXCL takes
+        // no argument. A port that has gone away fails the call, and there
+        // is nothing left to clear. The kernel keeps exclusive mode until
+        // the last open of the port closes, so it is cleared here too.
+        unsafe {
+            libc::ioctl(self.0.as_raw_fd(), libc::TIOCNXCL);
+        }
+    }
+}
+
+/// Opens a serial device raw at `baud`, as a GPS or AIS receiver expects,
+/// and holds it exclusively.
+fn open_serial(path: &Path, baud: u32) -> io::Result<HubPort> {
+    let device = open_device(path, true).map_err(|e| {
+        if e.kind() == io::ErrorKind::ResourceBusy {
+            io::Error::new(
+                e.kind(),
+                "busy: another program has the port open (a probe, a terminal, or a second omakeel)",
+            )
+        } else {
+            e
+        }
+    })?;
+    let port = HubPort(device);
+    configure(&port.0, baud, 1, 0)?;
+    Ok(port)
+}
+
+/// Opens a device non-blocking, so a port that would wait for carrier
+/// detect can't hang the open. `exclusive` makes the kernel refuse every
+/// other open of it, by anyone but root, until this one closes.
+fn open_device(path: &Path, exclusive: bool) -> io::Result<File> {
     let device = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
         .open(path)?;
+    if exclusive {
+        // SAFETY: `fd` is open for the life of `device`, and TIOCEXCL takes
+        // no argument.
+        if unsafe { libc::ioctl(device.as_raw_fd(), libc::TIOCEXCL) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(device)
+}
+
+/// Puts an open port in raw mode at `baud` and returns its settings from
+/// before. A GPS has no modem lines; CLOCAL says so, and then reads go back
+/// to blocking. A read returns once `min` bytes are in, or when `deciseconds`
+/// pass with a byte already in (`min` 0: with none).
+fn configure(device: &File, baud: u32, min: u8, deciseconds: u8) -> io::Result<libc::termios> {
+    let speed = speed(baud).ok_or_else(|| io::Error::other("unsupported baud rate"))?;
     let fd = device.as_raw_fd();
     // SAFETY: `fd` is open for the life of `device`, and `termios` is a
     // plain C struct that `tcgetattr` fills in before anything reads it.
@@ -234,12 +295,13 @@ fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
         if libc::tcgetattr(fd, &mut termios) != 0 {
             return Err(io::Error::last_os_error());
         }
+        let original = termios;
         libc::cfmakeraw(&mut termios);
         libc::cfsetispeed(&mut termios, speed);
         libc::cfsetospeed(&mut termios, speed);
         termios.c_cflag |= libc::CLOCAL | libc::CREAD;
-        termios.c_cc[libc::VMIN] = 1;
-        termios.c_cc[libc::VTIME] = 0;
+        termios.c_cc[libc::VMIN] = min;
+        termios.c_cc[libc::VTIME] = deciseconds;
         if libc::tcsetattr(fd, libc::TCSANOW, &termios) != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -247,8 +309,56 @@ fn open_serial(path: &Path, baud: u32) -> io::Result<File> {
         if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) != 0 {
             return Err(io::Error::last_os_error());
         }
+        Ok(original)
     }
-    Ok(device)
+}
+
+/// A serial port held by `omakeel probe`: exclusive, read with a 0.1 s
+/// timeout so a silent port can be given up on, and put back the way it was
+/// found when dropped.
+pub(crate) struct ProbePort {
+    device: File,
+    original: libc::termios,
+}
+
+impl ProbePort {
+    pub(crate) fn open(path: &Path, baud: u32) -> io::Result<ProbePort> {
+        let device = open_device(path, true)?;
+        let original = configure(&device, baud, 0, 1)?;
+        Ok(ProbePort { device, original })
+    }
+
+    /// Switches to `baud` and throws away what arrived at the old one.
+    pub(crate) fn set_baud(&self, baud: u32) -> io::Result<()> {
+        configure(&self.device, baud, 0, 1)?;
+        // SAFETY: `fd` is open for the life of `self.device`.
+        if unsafe { libc::tcflush(self.device.as_raw_fd(), libc::TCIFLUSH) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Reads what is there; `None` when nothing came within 0.1 s.
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+        match self.device.read(buf)? {
+            0 => Ok(None),
+            n => Ok(Some(n)),
+        }
+    }
+}
+
+impl Drop for ProbePort {
+    fn drop(&mut self) {
+        // SAFETY: `fd` is open for the life of `self.device`, and
+        // `self.original` is the struct `tcgetattr` filled in. TIOCNXCL
+        // takes no argument. A port that has gone away fails both calls, and
+        // there is nothing left to restore. Exclusive mode is cleared too,
+        // because the kernel keeps it until the last open of the port closes.
+        unsafe {
+            libc::tcsetattr(self.device.as_raw_fd(), libc::TCSANOW, &self.original);
+            libc::ioctl(self.device.as_raw_fd(), libc::TIOCNXCL);
+        }
+    }
 }
 
 /// Reads an NMEA stream over TCP, reconnecting when it drops.
