@@ -112,6 +112,37 @@ Use your GPS's baud rate. Our BU-353-style puck sends at 115200; older
 pucks send at 4800. At the wrong rate no fix ever comes: if `omakeel watch`
 shows no good sentences, try the other.
 
+Not sure which port or baud rate? Plug the receivers in and ask:
+
+```sh
+omakeel probe
+```
+
+```
+serial:/dev/serial/by-id/usb-Prolific_Technology_Inc._USB-Serial_Controller-if00-port0:4800  ok  fix=41 ais=0 rejected=2 at=37.8650000,-122.3200000
+serial:/dev/serial/by-id/usb-dAISy_AIS_Receiver_0001-if00:38400  ok  fix=0 ais=6 rejected=0
+serial:/dev/serial/by-id/usb-FTDI_FT232R-if00-port0  busy
+serial:/dev/serial/by-id/usb-Other_Device-if00-port0  silent
+```
+
+It scans `/dev/serial/by-id` (or `/dev/ttyUSB*` and `/dev/ttyACM*` where that
+directory is missing), or probes what you name: a path or `serial:PATH`
+tries every baud rate, `serial:PATH:BAUD` only that one, and `tcp:HOST:PORT`
+listens to a stream. Each rate gets 2.5 seconds, in the order 4800, 38400,
+9600, 115200, 19200, 57600, and the sweep stops at the first with three good
+sentences. A rate where AIS framing turns up is given 8 seconds, since a
+receiver in a quiet anchorage talks rarely. GPS and AIS are told apart by the
+sentences, never by who made the device.
+
+The verdict is `ok`, `denied` (add yourself to the `uucp` group), `busy`
+(something else holds the port, such as a running `omakeel run`), `silent`,
+`missing`, or `unreachable` with the reason. An `ok` line starts with a valid
+`--source`, baud included, so copy it as is. `fix` counts sentences with a
+real position, `ais` counts AIS sentences, and `rejected` counts lines that
+failed their checksum. `at` is the last position heard. The port is opened
+exclusively and put back the way it was found. Probe exits 0 whether or not
+it found anything.
+
 A phone sharing its GPS over Wi-Fi works too: `--source tcp:192.168.1.20:10110`.
 
 **In a VM with no USB**, such as Try Omarchy on a Mac, share the GPS from the
